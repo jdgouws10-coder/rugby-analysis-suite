@@ -3,6 +3,7 @@ const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
+const { pathToFileURL } = require("url");
 const { execFile } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 
@@ -16,12 +17,23 @@ function createWindow() {
     minHeight: 780,
     backgroundColor: "#020617",
     title: "Rugby Analysis Suite",
-    webPreferences: {
-      preload: path.join(__dirname, "preload.cjs"),
-      nodeIntegration: false,
-      contextIsolation: true,
+    autoHideMenuBar: true,
+    titleBarStyle: "hidden",
+    titleBarOverlay: {
+      color: "#02070d",
+      symbolColor: "#ffffff",
+      height: 36,
     },
+    webPreferences: {
+  preload: path.join(__dirname, "preload.cjs"),
+  nodeIntegration: false,
+  contextIsolation: true,
+  webSecurity: false,
+  allowRunningInsecureContent: true,
+},
   });
+
+  mainWindow.setMenuBarVisibility(false);
 
   if (app.isPackaged) {
     mainWindow.loadFile(path.join(app.getAppPath(), "dist", "index.html"));
@@ -36,10 +48,6 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
-  autoUpdater.on("checking-for-update", () => {
-    console.log("Checking for updates...");
-  });
-
   autoUpdater.on("update-available", async (info) => {
     const result = await dialog.showMessageBox(mainWindow, {
       type: "info",
@@ -51,21 +59,7 @@ function setupAutoUpdater() {
       cancelId: 1,
     });
 
-    if (result.response === 0) {
-      autoUpdater.downloadUpdate();
-    }
-  });
-
-  autoUpdater.on("update-not-available", () => {
-    console.log("No update available.");
-  });
-
-  autoUpdater.on("error", (error) => {
-    console.error("Auto updater error:", error);
-  });
-
-  autoUpdater.on("download-progress", (progress) => {
-    console.log(`Update download: ${Math.round(progress.percent)}%`);
+    if (result.response === 0) autoUpdater.downloadUpdate();
   });
 
   autoUpdater.on("update-downloaded", async () => {
@@ -79,13 +73,13 @@ function setupAutoUpdater() {
       cancelId: 1,
     });
 
-    if (result.response === 0) {
-      autoUpdater.quitAndInstall();
-    }
+    if (result.response === 0) autoUpdater.quitAndInstall();
   });
 
+  autoUpdater.on("error", (error) => console.error("Auto updater error:", error));
+
   setTimeout(() => {
-    autoUpdater.checkForUpdates();
+    autoUpdater.checkForUpdates().catch((error) => console.error("Update check failed:", error));
   }, 3000);
 }
 
@@ -123,7 +117,6 @@ function quoteConcatPath(filePath) {
 
 function buildTitleFilter(groupType) {
   const title = escapeDrawText(groupType);
-
   return [
     "pad=iw:ih+88:0:88:black",
     `drawtext=fontfile='C\\:/Windows/Fonts/arialbd.ttf':text='${title}':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=19`,
@@ -144,10 +137,73 @@ ipcMain.handle("select-video", async () => {
 
   if (result.canceled || result.filePaths.length === 0) return null;
 
+  const filePath = result.filePaths[0];
+
   return {
-    path: result.filePaths[0],
-    name: path.basename(result.filePaths[0]),
+    path: filePath,
+    name: path.basename(filePath),
+    url: pathToFileURL(filePath).toString(),
   };
+});
+
+
+ipcMain.handle("optimise-video-for-playback", async (_event, data) => {
+  const { videoPath } = data || {};
+
+  if (!videoPath) {
+    return { success: false, message: "No video path provided." };
+  }
+
+  if (!fs.existsSync(videoPath)) {
+    return { success: false, message: "Selected video file could not be found." };
+  }
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ras-playback-"));
+  const baseName = safeFileName(path.basename(videoPath, path.extname(videoPath)));
+  const outputPath = path.join(tempRoot, `${baseName || "match-footage"}-playback.mp4`);
+
+  try {
+    await runFFmpeg([
+      "-y",
+      "-i",
+      videoPath,
+      "-map",
+      "0:v:0",
+      "-map",
+      "0:a?",
+      "-c:v",
+      "libx264",
+      "-preset",
+      "veryfast",
+      "-crf",
+      "23",
+      "-pix_fmt",
+      "yuv420p",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "160k",
+      "-movflags",
+      "+faststart",
+      outputPath,
+    ]);
+
+    return {
+      success: true,
+      path: outputPath,
+      url: pathToFileURL(outputPath).toString(),
+      name: path.basename(outputPath),
+    };
+  } catch (error) {
+    try {
+      fs.rmSync(tempRoot, { recursive: true, force: true });
+    } catch (_) {}
+
+    return {
+      success: false,
+      message: error.message || "Could not optimise this video for playback.",
+    };
+  }
 });
 
 ipcMain.handle("generate-test-clip", async (_event, data) => {
@@ -197,9 +253,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
   const { videoPath, groups } = data;
 
   if (!videoPath) return { success: false, message: "No raw video selected." };
-  if (!groups || groups.length === 0) {
-    return { success: false, message: "No compilation groups available." };
-  }
+  if (!groups || groups.length === 0) return { success: false, message: "No compilation groups available." };
 
   const folderResult = await dialog.showOpenDialog({
     title: "Choose Folder For Compilations",
@@ -261,19 +315,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
 
       const outputPath = path.join(outputFolder, `${groupSlug}-compilation.mp4`);
 
-      await runFFmpeg([
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        listPath,
-        "-c",
-        "copy",
-        outputPath,
-      ]);
-
+      await runFFmpeg(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]);
       outputs.push(outputPath);
     }
 
