@@ -17,6 +17,7 @@ function createWindow() {
     minHeight: 780,
     backgroundColor: "#020617",
     title: "Rugby Analysis Suite",
+    icon: path.join(__dirname, "../build/icon.ico"),
     autoHideMenuBar: true,
     titleBarStyle: "hidden",
     titleBarOverlay: {

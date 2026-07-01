@@ -1593,3 +1593,99 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
     grid-template-columns: 1fr !important;
   }
 }
+
+
+/* ==============================
+   RAS v1.1.2 PATCH 2
+   Active logging back button
+================================= */
+
+.back-step-btn {
+  width: fit-content;
+  margin: -4px 0 2px;
+  border-color: rgba(126, 217, 87, 0.35);
+  background: rgba(255,255,255,0.07);
+}
+
+
+/* ==============================
+   RAS v1.2.0 HOME + REPORT POLISH
+================================= */
+.home-shell {
+  overflow: hidden;
+  background: #02070d;
+}
+
+.home-hero-bg,
+.home-hero-overlay {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+}
+
+.home-hero-bg {
+  background-size: cover;
+  background-position: center;
+  filter: saturate(0.9) contrast(1.06);
+  transform: scale(1.02);
+  opacity: 0.72;
+}
+
+.home-hero-overlay {
+  background:
+    radial-gradient(circle at 20% 32%, rgba(126, 217, 87, 0.18), transparent 28%),
+    linear-gradient(90deg, rgba(2, 7, 13, 0.95) 0%, rgba(2, 7, 13, 0.84) 44%, rgba(2, 7, 13, 0.74) 100%),
+    linear-gradient(0deg, rgba(2, 7, 13, 0.9), rgba(2, 7, 13, 0.32));
+  z-index: 0;
+}
+
+.premium-home-layout {
+  grid-template-columns: 1fr 0.92fr;
+  gap: 56px;
+}
+
+.premium-home-copy {
+  padding: 22px 0;
+}
+
+.home-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 28px;
+}
+
+.home-badges span {
+  border: 1px solid rgba(126, 217, 87, 0.28);
+  border-radius: 999px;
+  background: rgba(3, 11, 17, 0.58);
+  color: #d8dee9;
+  padding: 10px 13px;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  backdrop-filter: blur(8px);
+}
+
+.premium-module-stack .module-card {
+  min-height: 168px;
+  border-color: rgba(255, 255, 255, 0.12);
+  background: linear-gradient(135deg, rgba(3, 11, 17, 0.88), rgba(7, 22, 19, 0.78));
+  backdrop-filter: blur(14px);
+}
+
+.premium-module-stack .module-card.highlight {
+  border-color: rgba(126, 217, 87, 0.45);
+  box-shadow: 0 24px 70px rgba(92, 179, 56, 0.12), 0 22px 60px rgba(0,0,0,0.34);
+}
+
+.premium-module-stack .module-card h3 {
+  margin-top: 22px;
+}
+
+@media (max-width: 1100px) {
+  .premium-home-layout {
+    grid-template-columns: 1fr;
+  }
+}

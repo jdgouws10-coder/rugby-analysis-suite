@@ -2,6 +2,9 @@ import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 import "./App.css";
 
+const logoSrc = import.meta.env.DEV ? "/ras-logo.png" : "./ras-logo.png";
+const heroBgSrc = import.meta.env.DEV ? "/App theme.jpg" : "./App theme.jpg";
+
 declare global {
   interface Window {
     electronAPI: {
@@ -85,10 +88,11 @@ const goldZoneSuccessOutcomes = ["3 Points", "5 Points", "7 Points"];
 const ballLostReasons = [
   "Knock-on",
   "Forward Pass",
+  "Intercept",
   "Penalty Conceded",
   "Turnover",
   "Kick Lost",
-  "Into Touch",
+  "Taken Into Touch",
   "Scrum Lost",
   "Lineout Lost",
   "Held Up",
@@ -97,6 +101,8 @@ const ballLostReasons = [
 
 const ballWonReasons = [
   "Jackal",
+  "Ripped Ball",
+  "Opp Kick",
   "Knock-on",
   "Interception",
   "Counter Ruck",
@@ -153,6 +159,9 @@ const clipTypeOptions = [
   "Tackle Made",
   "Tackle Missed",
   "Ball Won",
+  "Opponent Lineout Stolen",
+  "Opponent Scrum Stolen",
+  "Try Conceded",
   "Penalty Conceded",
   "Maul Retained",
   "Maul Penalty Won",
@@ -174,7 +183,7 @@ const clipPaddingPresets: {
 ];
 
 const attackOutcomeOptions = ["Penalty Won", "3 Points", "5 Points", "7 Points", "Ball Lost", "Held Up – Retain Ball"];
-const defenceEventOptions = ["Tackle Made", "Tackle Missed", "Ball Won", "Penalty Won", "Penalty Conceded"];
+const defenceEventOptions = ["Tackle Made", "Tackle Missed", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Penalty Won", "Penalty Conceded", "Try Conceded"];
 const setPieceEventOptions = ["Lineout Won", "Lineout Lost", "Scrum Won", "Scrum Lost"];
 const kickOutcomeOptions = ["Good Exit", "Bad Exit", "Kick Regained", "Kick Lost"];
 
@@ -261,6 +270,7 @@ function matchesClipType(event: EventLog, type: string) {
     return event.outcome === type;
   }
   if (["Kick Regained", "Kick Lost", "Good Exit", "Bad Exit"].includes(type)) return event.category === "kick" && event.outcome === type;
+  if (type === "Opponent Lineout Stolen" || type === "Opponent Scrum Stolen") return event.event === type || event.outcome === type;
   return event.event === type || event.outcome === type;
 }
 
@@ -277,8 +287,8 @@ function totalGroupDuration(group: { clips: { rawStart: number; rawEnd: number }
 
 function eventTone(event: EventLog) {
   const outcome = event.outcome || event.event;
-  if (["Penalty Won", "3 Points", "5 Points", "7 Points", "Kick Regained", "Good Exit", "Lineout Won", "Scrum Won", "Ball Won", "Tackle Made", "Maul Try", "Maul Penalty Won", "Maul Retained", "Held Up – Retain Ball"].includes(outcome)) return "positive";
-  if (["Ball Lost", "Kick Lost", "Bad Exit", "Lineout Lost", "Scrum Lost", "Penalty Conceded", "Tackle Missed", "Maul Lost", "Maul Sacked"].includes(outcome)) return "negative";
+  if (["Penalty Won", "3 Points", "5 Points", "7 Points", "Kick Regained", "Good Exit", "Lineout Won", "Scrum Won", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Tackle Made", "Maul Try", "Maul Penalty Won", "Maul Retained", "Held Up – Retain Ball"].includes(outcome)) return "positive";
+  if (["Ball Lost", "Kick Lost", "Bad Exit", "Lineout Lost", "Scrum Lost", "Penalty Conceded", "Tackle Missed", "Try Conceded", "Maul Lost", "Maul Sacked"].includes(outcome)) return "negative";
   return "neutral";
 }
 
@@ -470,8 +480,13 @@ export default function App() {
   }, 0);
   const tackleMade = defenceEvents.filter((event) => event.event === "Tackle Made").length;
   const tackleMissed = defenceEvents.filter((event) => event.event === "Tackle Missed").length;
-  const ballWon = defenceEvents.filter((event) => event.event === "Ball Won").length;
+  const ballWon = defenceEvents.filter((event) => event.event === "Ball Won" || event.event === "Opponent Lineout Stolen" || event.event === "Opponent Scrum Stolen").length;
   const penaltiesConceded = defenceEvents.filter((event) => event.event === "Penalty Conceded" || event.outcome === "Penalty Conceded").length;
+  const rippedBalls = defenceEvents.filter((event) => event.reason === "Ripped Ball").length;
+  const oppKicks = defenceEvents.filter((event) => event.reason === "Opp Kick").length;
+  const opponentLineoutsStolen = defenceEvents.filter((event) => event.event === "Opponent Lineout Stolen" || event.outcome === "Opponent Lineout Stolen").length;
+  const opponentScrumsStolen = defenceEvents.filter((event) => event.event === "Opponent Scrum Stolen" || event.outcome === "Opponent Scrum Stolen").length;
+  const triesConceded = defenceEvents.filter((event) => event.event === "Try Conceded" || event.outcome === "Try Conceded").length;
 
   const totalPreviewClips = generatedClips.reduce((total, group) => total + group.clips.length, 0);
   const totalPreviewDuration = generatedClips.reduce((total, group) => total + totalGroupDuration(group), 0);
@@ -711,6 +726,17 @@ export default function App() {
     setGeneratedClips([]);
   }
 
+  function cancelCurrentEvent() {
+    setAttackActive(false);
+    setAttackStartZone("");
+    setCurrentAttackType("");
+    setPhaseCount(0);
+    setMaulActive(false);
+    setMaulStartZone("");
+    setMaulPhaseCount(0);
+    notify("Returned", "Current logging step cancelled. No event was added.", "info");
+  }
+
   function clearWorkspace() {
     const shouldClear = window.confirm(
       "Clear Match?\n\nThis will remove the loaded video, match details, tagged events and analysis state."
@@ -750,7 +776,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.1.0",
+      version: "1.2.0",
       matchName,
       opposition,
       competition,
@@ -817,76 +843,205 @@ export default function App() {
 
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
     const margin = 16;
     let y = 18;
     const title = matchTitle === "No Match Loaded" ? "Match Analysis" : matchTitle;
 
-    function addSection(titleText: string) {
-      y += 8;
-      if (y > 270) {
+    const normaliseReason = (reason?: string) => {
+      if (!reason) return "Not specified";
+      if (reason === "Into Touch") return "Taken Into Touch";
+      return reason;
+    };
+
+    const ballLostReasonBreakdown = attacks
+      .filter((event) => event.outcome === "Ball Lost")
+      .reduce<Record<string, number>>((summary, event) => {
+        const reason = normaliseReason(event.reason);
+        summary[reason] = (summary[reason] || 0) + 1;
+        return summary;
+      }, {});
+
+    const attackEfficiencyValue = Number(percent(successfulAttacks, totalAttacks));
+    const ballLossRateValue = Number(percent(ballLosses, totalAttacks));
+    const goldZoneValue = Number(percent(successfulGoldZoneEntries.length, goldZoneEntries.length));
+    const tackleCompletionValue = Number(percent(tackleMade, tackleMade + tackleMissed));
+    const lineoutValue = Number(percent(lineoutsWon, totalLineouts));
+    const scrumValue = Number(percent(scrumsWon, totalScrums));
+    const exitValue = Number(percent(goodExits, exitKicks.length));
+
+    const coachTargets = [
+      { label: "Attack Efficiency", value: attackEfficiencyValue, display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%+", meets: attackEfficiencyValue >= 45 || totalAttacks === 0 },
+      { label: "Ball Loss Rate", value: ballLossRateValue, display: `${ballLossRateValue.toFixed(1)}%`, target: "Under 18%", meets: ballLossRateValue <= 18 || totalAttacks === 0 },
+      { label: "Gold Zone Conversion", value: goldZoneValue, display: `${goldZoneValue.toFixed(1)}%`, target: "60%+", meets: goldZoneValue >= 60 || goldZoneEntries.length === 0 },
+      { label: "Tackle Completion", value: tackleCompletionValue, display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%+", meets: tackleCompletionValue >= 88 || (tackleMade + tackleMissed) === 0 },
+      { label: "Lineout Success", value: lineoutValue, display: `${lineoutValue.toFixed(1)}%`, target: "85%+", meets: lineoutValue >= 85 || totalLineouts === 0 },
+      { label: "Scrum Success", value: scrumValue, display: `${scrumValue.toFixed(1)}%`, target: "90%+", meets: scrumValue >= 90 || totalScrums === 0 },
+      { label: "Exit Success", value: exitValue, display: `${exitValue.toFixed(1)}%`, target: "80%+", meets: exitValue >= 80 || exitKicks.length === 0 },
+    ];
+
+    const coachSummary: string[] = [];
+    const knockOns = ballLostReasonBreakdown["Knock-on"] || 0;
+    const intercepts = ballLostReasonBreakdown["Intercept"] || 0;
+    const takenIntoTouch = ballLostReasonBreakdown["Taken Into Touch"] || 0;
+    const turnovers = ballLostReasonBreakdown["Turnover"] || 0;
+    const forwardPasses = ballLostReasonBreakdown["Forward Pass"] || 0;
+    const penaltiesLost = ballLostReasonBreakdown["Penalty Conceded"] || 0;
+
+    if (attackEfficiencyValue >= 45 && totalAttacks > 0) coachSummary.push("Attack efficiency met the recommended target. Review clips to identify which shapes created the cleanest outcomes.");
+    if (ballLossRateValue <= 18 && totalAttacks > 0) coachSummary.push("Ball security was within the target range. Keep reinforcing support depth and clear decision-making.");
+    if (knockOns > 0) coachSummary.push(`${knockOns} knock-on(s): review carry height, contact skill, pass timing and catch quality under pressure.`);
+    if (intercepts > 0) coachSummary.push(`${intercepts} intercept(s): check whether the pass was forced, whether the receiver was flat, and whether the defender was fixed before release.`);
+    if (takenIntoTouch > 0) coachSummary.push(`${takenIntoTouch} taken into touch: review edge spacing, touchline awareness, support angle and whether the carrier had an inside option.`);
+    if (turnovers > 0) coachSummary.push(`${turnovers} turnover(s): review cleanout arrival, support depth and whether the ball carrier became isolated.`);
+    if (forwardPasses > 0) coachSummary.push(`${forwardPasses} forward pass(es): review running lines and whether the passer is drifting before release.`);
+    if (penaltiesLost > 0) coachSummary.push(`${penaltiesLost} penalty loss(es): review decision-making at the breakdown and whether support players are arriving legally.`);
+    if (ballLossRateValue > 18 && totalAttacks > 0) coachSummary.push("Ball loss rate is above the recommended target. Prioritise possession security before adding more attacking complexity.");
+    if (goldZoneValue < 60 && goldZoneEntries.length > 0) coachSummary.push("Gold zone conversion is below target. Review shape clarity, patience, and whether the attack is creating two genuine scoring options.");
+    if (triesConceded > 0) coachSummary.push(`${triesConceded} try/tries conceded: clip these moments and review defensive connection immediately after possession changes.`);
+    if (!coachSummary.length) coachSummary.push("No major red flags from the logged data. Use clips to confirm the tactical picture and validate the statistics.");
+
+    function ensureSpace(space = 12) {
+      if (y + space > pageHeight - 18) {
+        addFooter();
         doc.addPage();
         y = 18;
       }
+    }
+
+    function addFooter() {
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, pageHeight - 13, pageWidth - margin, pageHeight - 13);
+      doc.setTextColor(100, 116, 139);
+      doc.setFontSize(8);
+      doc.setFont("helvetica", "normal");
+      doc.text("Generated by Rugby Analysis Suite v1.2.0", margin, pageHeight - 8);
+      doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
+    }
+
+    function addSection(titleText: string) {
+      y += 8;
+      ensureSpace(18);
       doc.setFillColor(6, 17, 10);
-      doc.rect(margin, y - 5, pageWidth - margin * 2, 9, "F");
+      doc.roundedRect(margin, y - 6, pageWidth - margin * 2, 10, 2, 2, "F");
       doc.setTextColor(255, 255, 255);
-      doc.setFontSize(11);
+      doc.setFontSize(10.5);
       doc.setFont("helvetica", "bold");
-      doc.text(titleText, margin + 3, y + 1);
-      y += 10;
+      doc.text(titleText, margin + 4, y + 1);
+      y += 12;
       doc.setTextColor(15, 23, 42);
     }
 
     function addLine(label: string, value: string | number) {
-      if (y > 282) {
-        doc.addPage();
-        y = 18;
-      }
-      doc.setFontSize(10);
+      ensureSpace(8);
+      doc.setFontSize(9.5);
       doc.setFont("helvetica", "normal");
+      doc.setTextColor(51, 65, 85);
       doc.text(label, margin, y);
       doc.setFont("helvetica", "bold");
+      doc.setTextColor(15, 23, 42);
       doc.text(String(value), pageWidth - margin, y, { align: "right" });
       y += 7;
     }
 
+    function addParagraph(text: string) {
+      const lines = doc.splitTextToSize(text, pageWidth - margin * 2 - 4);
+      ensureSpace(lines.length * 5 + 4);
+      doc.setFontSize(9.2);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(51, 65, 85);
+      doc.text(lines, margin + 2, y);
+      y += lines.length * 5 + 4;
+    }
+
+    function addTargetLine(target: typeof coachTargets[number]) {
+      ensureSpace(9);
+      doc.setFontSize(9.5);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(51, 65, 85);
+      doc.text(target.label, margin, y);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(target.meets ? 34 : 220, target.meets ? 139 : 38, target.meets ? 34 : 38);
+      doc.text(target.display, pageWidth - margin - 38, y, { align: "right" });
+      doc.setTextColor(100, 116, 139);
+      doc.text(target.target, pageWidth - margin, y, { align: "right" });
+      y += 7;
+    }
+
+    function addKpiCard(x: number, label: string, value: string, meets: boolean) {
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(x, y, 42, 22, 3, 3, "FD");
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.3);
+      doc.setTextColor(100, 116, 139);
+      doc.text(label.toUpperCase(), x + 3, y + 6);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(13);
+      doc.setTextColor(meets ? 34 : 220, meets ? 139 : 38, meets ? 34 : 38);
+      doc.text(value, x + 3, y + 16);
+    }
+
+    // Header
     doc.setFillColor(2, 7, 13);
-    doc.rect(0, 0, pageWidth, 34, "F");
+    doc.rect(0, 0, pageWidth, 38, "F");
+    doc.setFillColor(126, 217, 87);
+    doc.rect(0, 37, pageWidth, 1.5, "F");
+
+    const logoImage = document.querySelector<HTMLImageElement>(".logo-wrap img");
+    try {
+      if (logoImage && logoImage.complete && logoImage.naturalWidth > 0) {
+        doc.addImage(logoImage, "PNG", margin, 7, 22, 22);
+      }
+    } catch (_) {}
+
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(18);
-    doc.text("RUGBY STAT REPORT", margin, 14);
-    doc.setFontSize(11);
+    doc.text("RUGBY STAT REPORT", margin + 28, 15);
+    doc.setFontSize(10.5);
     doc.setFont("helvetica", "normal");
-    doc.text(title, margin, 24);
+    doc.text(title, margin + 28, 25);
 
-    doc.setTextColor(15, 23, 42);
-    y = 44;
+    y = 50;
     if (competition) addLine("Competition", competition);
     addLine("Events Logged", events.length);
     addLine("Match Footage", rawVideoName || "Not loaded");
     addLine("Analysis Level", titleCase(analysisLevel));
 
+    y += 3;
+    const kpiY = y;
+    addKpiCard(margin, "Attack Eff.", `${attackEfficiencyValue.toFixed(1)}%`, attackEfficiencyValue >= 45 || totalAttacks === 0);
+    addKpiCard(margin + 46, "Gold Zone", `${goldZoneValue.toFixed(1)}%`, goldZoneValue >= 60 || goldZoneEntries.length === 0);
+    addKpiCard(margin + 92, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
+    addKpiCard(margin + 138, "Exit", `${exitValue.toFixed(1)}%`, exitValue >= 80 || exitKicks.length === 0);
+    y = kpiY + 24;
+
     addSection("ATTACK");
     addLine("Total Attacks", totalAttacks);
     addLine("Successful Attacks", successfulAttacks);
-    addLine("Attack Efficiency", `${percent(successfulAttacks, totalAttacks)}%`);
+    addLine("Attack Efficiency", `${attackEfficiencyValue.toFixed(1)}%`);
     addLine("Ball Losses", ballLosses);
-    addLine("Ball Loss Rate", `${percent(ballLosses, totalAttacks)}%`);
+    addLine("Ball Loss Rate", `${ballLossRateValue.toFixed(1)}%`);
     addLine("Average Phases Per Attack", average(attacks.map((event) => event.phases || 0)));
 
     addSection("GOLD ZONE");
     addLine("Entries", goldZoneEntries.length);
     addLine("Successful Entries", successfulGoldZoneEntries.length);
-    addLine("Gold Zone Efficiency", `${percent(successfulGoldZoneEntries.length, goldZoneEntries.length)}%`);
+    addLine("Gold Zone Efficiency", `${goldZoneValue.toFixed(1)}%`);
     addLine("Points Generated", goldZonePoints);
 
     addSection("DEFENCE");
     addLine("Tackle Made", tackleMade);
     addLine("Tackle Missed", tackleMissed);
-    addLine("Tackle Completion", `${percent(tackleMade, tackleMade + tackleMissed)}%`);
+    addLine("Tackle Completion", `${tackleCompletionValue.toFixed(1)}%`);
     addLine("Ball Won", ballWon);
+    addLine("Ball Won - Ripped Ball", rippedBalls);
+    addLine("Ball Won - Opp Kick", oppKicks);
+    addLine("Opponent Lineout Stolen", opponentLineoutsStolen);
+    addLine("Opponent Scrum Stolen", opponentScrumsStolen);
     addLine("Penalties Conceded", penaltiesConceded);
+    addLine("Tries Conceded", triesConceded);
 
     addSection("KICKING");
     addLine("Contestable Kicks", contestableKicks.length);
@@ -894,13 +1049,22 @@ export default function App() {
     addLine("Contestable Kick Effectiveness", `${percent(kickRegained, contestableKicks.length)}%`);
     addLine("Exit Kicks", exitKicks.length);
     addLine("Good Exits", goodExits);
-    addLine("Exit Success", `${percent(goodExits, exitKicks.length)}%`);
+    addLine("Exit Success", `${exitValue.toFixed(1)}%`);
 
     addSection("SET PIECE");
     addLine("Lineouts", `${lineoutsWon}W / ${lineoutsLost}L`);
-    addLine("Lineout Success", `${percent(lineoutsWon, totalLineouts)}%`);
+    addLine("Lineout Success", `${lineoutValue.toFixed(1)}%`);
     addLine("Scrums", `${scrumsWon}W / ${scrumsLost}L`);
-    addLine("Scrum Success", `${percent(scrumsWon, totalScrums)}%`);
+    addLine("Scrum Success", `${scrumValue.toFixed(1)}%`);
+
+    addSection("BALL LOSS BREAKDOWN");
+    if (Object.keys(ballLostReasonBreakdown).length) {
+      Object.entries(ballLostReasonBreakdown)
+        .sort((a, b) => b[1] - a[1])
+        .forEach(([reason, count]) => addLine(reason, count));
+    } else {
+      addLine("Ball Lost Reasons", "None logged");
+    }
 
     addSection("ATTACK TYPE BREAKDOWN");
     attackTypes.forEach((type) => {
@@ -909,12 +1073,15 @@ export default function App() {
       addLine(type, `${typeAttacks.length} attacks | ${typeSuccessful} successful | ${percent(typeSuccessful, typeAttacks.length)}% | Avg phases ${average(typeAttacks.map((event) => event.phases || 0))}`);
     });
 
-    doc.setTextColor(100, 116, 139);
-    doc.setFontSize(8);
-    doc.setFont("helvetica", "normal");
-    doc.text("Generated by Rugby Analysis Suite", margin, 287);
+    addSection("COACH TARGETS");
+    coachTargets.forEach(addTargetLine);
+
+    addSection("COACH SUMMARY");
+    coachSummary.forEach((suggestion) => addParagraph(`• ${suggestion}`));
+
+    addFooter();
     doc.save(`${safeFileName(title)}-stat-report.pdf`);
-    notify("Stat Report Exported", "A PDF stat report was created.", "success");
+    notify("Stat Report Exported", `${events.length} events exported into the PDF report.`, "success");
   }
 
   function sendToCompilationVideos() {
@@ -1213,7 +1380,7 @@ export default function App() {
     return (
       <header className="ras-topbar">
         <button className="logo-wrap" onClick={() => setView("home")} aria-label="Home">
-          <img src="/ras-logo.png" alt="Rugby Analysis Suite" />
+          <img src={logoSrc} alt="Rugby Analysis Suite" />
         </button>
         <div className="topbar-brand">
           <h1>Rugby Analysis Suite</h1>
@@ -1221,7 +1388,7 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.1.0</span>
+          <span className="version-pill">v1.2.0</span>
         </div>
       </header>
     );
@@ -1243,19 +1410,26 @@ export default function App() {
 
   function Home() {
     return (
-      <main className="ras-shell">
+      <main className="ras-shell home-shell">
+        <div className="home-hero-bg" style={{ backgroundImage: `url("${heroBgSrc}")` }} />
+        <div className="home-hero-overlay" />
         <div className="grid-bg" />
         <Topbar />
-        <section className="home-layout">
-          <div className="home-copy">
-            <p className="home-kicker">Built by coaches. For coaches.</p>
+        <section className="home-layout premium-home-layout">
+          <div className="home-copy premium-home-copy">
+            <p className="home-kicker">Professional Performance Platform</p>
             <h2 className="home-title">Rugby<br /><span>Analysis</span><br />Suite</h2>
-            <p className="home-subtitle">Professional rugby analysis software for match review, compilation videos and tactical planning.</p>
+            <p className="home-subtitle">Analyse matches, create coaching clips and prepare better rugby reviews from one professional platform.</p>
+            <div className="home-badges">
+              <span>Match Review</span>
+              <span>Video Workflow</span>
+              <span>Coach Reports</span>
+            </div>
           </div>
-          <div className="module-stack">
-            <ModuleCard number="01" title="Match Analysis" status="Available" description="Analyse matches, tag events and export performance data." action="Open Module →" onClick={() => setView("analysis")} />
-            <ModuleCard number="02" title="Compilation Videos" status="Available" description="Create professional MP4 compilation videos from tagged analysis events." action="Launch Module →" onClick={() => setView("compilations")} highlight />
-            <ModuleCard number="03" title="Play Creator" status="In Development" description="Design attacking plays, strike moves and tactical animations." action="Preview →" onClick={() => setView("plays")} />
+          <div className="module-stack premium-module-stack">
+            <ModuleCard number="01" title="Match Analysis" status="Available" description="Tag attack, defence, kicking, set piece and maul events. Export professional coach reports." action="Open Module →" onClick={() => setView("analysis")} />
+            <ModuleCard number="02" title="Auto Clip Creator" status="Available" description="Turn tagged moments into organised MP4 coaching compilations from the raw match footage." action="Launch Module →" onClick={() => setView("compilations")} highlight />
+            <ModuleCard number="03" title="Attack Lab" status="In Development" description="Design, animate and test attacking ideas under the Rugby Analysis Suite brand." action="Preview →" onClick={() => setView("plays")} />
           </div>
         </section>
         <NoticeToast />
@@ -1392,6 +1566,7 @@ export default function App() {
             <div className="active-strip">
               <span>Type: {currentAttackType}</span><span>Zone: {attackStartZone}</span><span>Phases: {phaseCount}</span>
             </div>
+            <button className="secondary-btn small back-step-btn" onClick={cancelCurrentEvent}>← Back</button>
             <div className="button-grid six responsive-six">
               <button onClick={() => setPhaseCount((prev) => prev + 1)}>+ Phase</button>
               <button onClick={() => finishAttack("Penalty Won")}>Penalty Won</button>
@@ -1435,6 +1610,7 @@ export default function App() {
                     <div className="active-strip maul-active-strip">
                       <span>Maul Active</span><span>Zone: {maulStartZone}</span><span>Phases: {maulPhaseCount}</span>
                     </div>
+                    <button className="secondary-btn small back-step-btn" onClick={cancelCurrentEvent}>← Back</button>
                     <div className="button-grid three maul-outcomes">
                       <button onClick={() => setMaulPhaseCount((prev) => prev + 1)}>+ Phase</button>
                       <button onClick={() => finishMaul("Maul Retained")}>Maul Retained</button>
@@ -1466,6 +1642,9 @@ export default function App() {
         <div className="button-grid two">
           <button onClick={() => addDefenceEvent("Tackle Made")}>Tackle Made</button>
           <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed</button>
+          <button onClick={() => addDefenceEvent("Opponent Lineout Stolen")}>Opponent Lineout Stolen</button>
+          <button onClick={() => addDefenceEvent("Opponent Scrum Stolen")}>Opponent Scrum Stolen</button>
+          <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded</button>
         </div>
         <div className="reason-grid">
           <label>Ball Won Reason<select value={ballWonReason} onChange={(event) => setBallWonReason(event.target.value)}>{ballWonReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
@@ -1694,7 +1873,7 @@ export default function App() {
 
   function PlaysPage() {
     return (
-      <main className="ras-shell center-shell"><div className="grid-bg" /><div className="coming-card"><img src="/ras-logo.png" alt="Rugby Analysis Suite" /><p className="home-kicker">In Development</p><h1>Play Creator</h1><p>Design attacking plays, strike moves and tactical animations. This module is coming soon.</p><button className="primary-btn" onClick={() => setView("home")}>← Back Home</button></div><NoticeToast /></main>
+      <main className="ras-shell center-shell"><div className="grid-bg" /><div className="coming-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="home-kicker">In Development</p><h1>Play Creator</h1><p>Design attacking plays, strike moves and tactical animations. This module is coming soon.</p><button className="primary-btn" onClick={() => setView("home")}>← Back Home</button></div><NoticeToast /></main>
     );
   }
 
