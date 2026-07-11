@@ -26,6 +26,10 @@ declare global {
         groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
       onUpdateProgress?: (callback: (progress: { percent: number; transferred?: number; total?: number }) => void) => () => void;
+      onCompilationProgress?: (callback: (progress: { group?: string; clip?: number; groupClips?: number; completed: number; total: number; percent: number; done?: boolean }) => void) => () => void;
+      checkForUpdates?: () => Promise<{ success: boolean; message?: string }>;
+      getAppVersion?: () => Promise<string>;
+      onUpdateStatus?: (callback: (status: { state: string; message: string; version?: string }) => void) => () => void;
     };
   }
 }
@@ -41,7 +45,7 @@ type KickType = "Exit" | "Contestable" | "Clearance";
 type AttackAction = "phase" | "finish" | "kick";
 type KeybindAction = "playPause" | "seekBack" | "seekForward" | "speedUp" | "speedDown" | "undoEvent" | "attackPanel" | "defencePanel" | "gainlineWon" | "gainlineNeutral" | "gainlineLost" | "ruckQuick" | "ruckAverage" | "ruckSlow" | "completePhase" | "undoPhase" | "finishAttack" | "kick" | "backToPhase" | "tackleMade" | "tackleMissed" | "ballWon" | "penaltyWon" | "penaltyConceded" | "oppositionHeldUp" | "tryConceded";
 type Keybinds = Record<KeybindAction, string>;
-type SettingsTab = "keybinds" | "appearance" | "profile";
+type SettingsTab = "keybinds" | "appearance" | "profile" | "updates";
 type AppearanceSettings = { accent: string; accent2: string; motion: "off" | "subtle" | "full"; density: "compact" | "comfortable"; backdrop: number; glass: number };
 type AnalystProfile = { name: string; role: string; email: string; phone: string };
 
@@ -496,6 +500,7 @@ export default function App() {
   const [lastSessionSaved, setLastSessionSaved] = useState("");
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [clipStage, setClipStage] = useState(0);
+  const [compilationProgress, setCompilationProgress] = useState<{ group?: string; clip?: number; groupClips?: number; completed: number; total: number; percent: number } | null>(null);
 
   const [attackActive, setAttackActive] = useState(false);
   const [attackStartZone, setAttackStartZone] = useState("");
@@ -531,6 +536,11 @@ export default function App() {
   const [isGeneratingCompilation, setIsGeneratingCompilation] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready.");
   const [editingEvent, setEditingEvent] = useState<EditableEvent | null>(null);
+  const [showExportCheck, setShowExportCheck] = useState(false);
+  const [showShortcutGuide, setShowShortcutGuide] = useState(false);
+  const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
+  const [appVersion, setAppVersion] = useState("1.3.3");
+  const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
 
   const attacks = events.filter((event) => event.category === "attack");
   const defenceEvents = events.filter((event) => event.category === "defence");
@@ -626,6 +636,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!window.electronAPI?.onCompilationProgress) return;
+    return window.electronAPI.onCompilationProgress((progress) => setCompilationProgress(progress.done ? null : progress));
+  }, []);
+
+  useEffect(() => {
+    window.electronAPI?.getAppVersion?.().then(setAppVersion).catch(() => {});
+    if (!window.electronAPI?.onUpdateStatus) return;
+    return window.electronAPI.onUpdateStatus(setUpdateStatus);
+  }, []);
+
+  useEffect(() => {
     if (!isGeneratingCompilation) { setClipStage(0); return; }
     const timer = window.setInterval(() => setClipStage((stage) => Math.min(3, stage + 1)), 2400);
     return () => window.clearInterval(timer);
@@ -649,6 +670,7 @@ export default function App() {
     function handleKeyDown(event: KeyboardEvent) {
       if (isTypingTarget(event.target) || editingEvent) return;
       const shortcut = shortcutFromEvent(event);
+      if (event.key === "?") { event.preventDefault(); setShowShortcutGuide((visible) => !visible); return; }
 
       if (shortcut === keybinds.playPause) {
         if (!videoRef.current) return;
@@ -734,9 +756,22 @@ export default function App() {
     setAnalystProfile(read(`ras-analyst-profile-${id}`, { ...defaultProfile, name: base.name, role: base.role }));
     let saved: any = null;
     try { saved = JSON.parse(localStorage.getItem(`ras-last-session-${id}`) || "null"); } catch (_) {}
-    setMatchName(saved?.matchName || ""); setOpposition(saved?.opposition || ""); setCompetition(saved?.competition || ""); setEvents(Array.isArray(saved?.events) ? saved.events : []);
-    setRawVideoName(saved?.rawVideoName || ""); setRawVideoPath(saved?.rawVideoPath || ""); setRawVideoUrl(saved?.rawVideoUrl || ""); setPlaybackVideoUrl(saved?.playbackVideoUrl || saved?.rawVideoUrl || ""); setLastSessionSaved(saved?.savedAt || "");
+    setMatchName(""); setOpposition(""); setCompetition(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
+    setRecoveryCandidate(saved ? { id, saved } : null);
     setGeneratedClips([]); setProfileSelected(true); setView("home");
+  }
+
+  function restoreRecoveredSession() {
+    const saved = recoveryCandidate?.saved;
+    if (!saved) return;
+    setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+    setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
+    setRecoveryCandidate(null); setView("analysis"); notify("Session Restored", `${saved.events?.length || 0} tagged events recovered.`, "success");
+  }
+
+  function discardRecoveredSession() {
+    if (recoveryCandidate?.id) localStorage.removeItem(`ras-last-session-${recoveryCandidate.id}`);
+    setRecoveryCandidate(null);
   }
 
   function closeNotice() {
@@ -1074,7 +1109,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.3.2",
+      version: "1.3.3",
       matchName,
       opposition,
       competition,
@@ -1131,9 +1166,21 @@ export default function App() {
   }
 
 
-  function exportPDFReport() {
+  const exportWarnings = [
+    !matchName ? "Your team name is missing." : "",
+    !opposition ? "Opposition name is missing." : "",
+    attacks.some((event) => !event.phases) ? `${attacks.filter((event) => !event.phases).length} attack(s) contain no completed phases.` : "",
+    kickEvents.some((event) => !event.outcome) ? "One or more kicks have no outcome." : "",
+    allAttackPhases.length < 5 && attacks.length ? "Too few classified phases for reliable gainline and ruck-speed insights." : "",
+  ].filter(Boolean);
+
+  function exportPDFReport(confirmed = false) {
     if (!events.length) {
       notify("No Events", "Tag events before exporting a stat report.", "warning");
+      return;
+    }
+    if (!confirmed && exportWarnings.length) {
+      setShowExportCheck(true);
       return;
     }
 
@@ -1234,7 +1281,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.2", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.3", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1324,7 +1371,6 @@ export default function App() {
 
     y = 50;
     if (competition) addLine("Competition", competition);
-    if (analystProfile.name) addLine("Analyst", `${analystProfile.name}${analystProfile.role ? ` • ${analystProfile.role}` : ""}`);
     addLine("Events Logged", events.length);
     addLine("Match Footage", rawVideoName || "Not loaded");
 
@@ -1718,10 +1764,11 @@ export default function App() {
           <p>{moduleTitle || "Professional Performance Platform"}</p>
         </div>
         <div className="topbar-actions">
+          <button className="support-btn" onClick={() => setShowShortcutGuide(true)}>Shortcuts</button>
           <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
           <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.2</span>
+          <span className="version-pill">v1.3.3</span>
         </div>
       </header>
     );
@@ -1807,7 +1854,7 @@ export default function App() {
           <input ref={projectInputRef} type="file" hidden accept=".ras,application/json" onChange={(event) => openProject(event.target.files?.[0])} />
           <button className="primary-btn" onClick={saveProject}>Save Match</button>
           <button className="danger-btn" onClick={clearWorkspace}>Clear Match</button>
-          <button className="secondary-btn" onClick={exportPDFReport}>Export PDF</button>
+          <button className="secondary-btn" onClick={() => exportPDFReport()}>Export PDF</button>
           <button className="primary-btn wide-action" onClick={sendToCompilationVideos}>Send Events to Compilation Tool</button>
         </section>
 
@@ -2296,6 +2343,7 @@ export default function App() {
             <button className={settingsTab === "keybinds" ? "active" : ""} onClick={() => setSettingsTab("keybinds")}>Keybinds</button>
             <button className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}>Appearance</button>
             <button className={settingsTab === "profile" ? "active" : ""} onClick={() => setSettingsTab("profile")}>Analyst Profile</button>
+            <button className={settingsTab === "updates" ? "active" : ""} onClick={() => setSettingsTab("updates")}>Updates</button>
           </div>
           {settingsTab === "keybinds" && <div className="settings-groups">
             {groups.map((group) => {
@@ -2319,6 +2367,7 @@ export default function App() {
             <section className="panel analyst-brand-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="eyebrow">Official Brand</p><h3>Rugby Analysis Suite</h3><p>The company name and logo stay consistent across every analyst and client delivery.</p></section>
             <section className="panel analyst-profile-form"><p className="eyebrow">Your Details • {activeAnalystId === "jd" ? "Owner" : "Analyst"}</p><h3>Personalise your analyst identity.</h3><label>Analyst name<input readOnly value={analystProfile.name} /></label><label>Role<input value={analystProfile.role} onChange={(event) => setAnalystProfile((current) => ({ ...current, role: event.target.value }))} placeholder="Performance Analyst" /></label><label>Email<input value={analystProfile.email} onChange={(event) => setAnalystProfile((current) => ({ ...current, email: event.target.value }))} placeholder="you@email.com" /></label><label>Phone<input value={analystProfile.phone} onChange={(event) => setAnalystProfile((current) => ({ ...current, phone: event.target.value }))} placeholder="Optional" /></label></section>
           </div>}
+          {settingsTab === "updates" && <section className="panel update-centre"><div className="update-orb"><span>{appVersion}</span></div><p className="eyebrow">Update Centre</p><h2>Rugby Analysis Suite v{appVersion}</h2><p>{updateStatus.message}</p><div className={`update-state ${updateStatus.state}`}><i /><span>{titleCase(updateStatus.state.replace(/-/g, " "))}</span></div><button className="primary-btn" disabled={updateStatus.state === "checking" || updateStatus.state === "downloading"} onClick={async () => { setUpdateStatus({ state: "checking", message: "Checking GitHub for the latest release…" }); const result = await window.electronAPI?.checkForUpdates?.(); if (result && !result.success) setUpdateStatus({ state: "error", message: result.message || "Update check failed." }); }}>Check for Updates</button><small>Automatic checks still run shortly after the packaged app launches.</small></section>}
         </section>
         <NoticeToast />
       </main>
@@ -2353,7 +2402,7 @@ export default function App() {
     const activity = updateProgress !== null && updateProgress < 100
       ? { eyebrow: "App Update", title: "Downloading the latest build", detail: `${updateProgress}% complete`, progress: updateProgress }
       : isGeneratingCompilation
-        ? { eyebrow: "Clip Engine", title: clipStages[clipStage], detail: `${generatedClips.length} compilation groups in the render queue`, progress: null }
+        ? { eyebrow: "Clip Engine", title: compilationProgress?.group ? `Rendering ${compilationProgress.group}` : clipStages[clipStage], detail: compilationProgress ? `Clip ${compilationProgress.clip || 0} of ${compilationProgress.groupClips || 0} • ${compilationProgress.completed} of ${compilationProgress.total} overall` : `${generatedClips.length} compilation groups in the render queue`, progress: compilationProgress ? Math.round(compilationProgress.percent) : null }
         : isGenerating
           ? { eyebrow: "Clip Engine", title: "Generating test clip", detail: "Preparing a short quality-check export", progress: null }
           : isOptimisingVideo
@@ -2368,11 +2417,23 @@ export default function App() {
     return <div className="analyst-gate"><div className="analyst-gate-bg" /><section className="analyst-gate-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="home-kicker">Internal Analyst Workspace</p><h1>Who’s analysing today?</h1><p>Select your profile to load your personal keybinds, appearance, details and recent session.</p><div className="analyst-profile-options">{analystProfiles.map((profile) => <button key={profile.id} onClick={() => chooseAnalyst(profile.id)}><span>{profile.name.split(" ").map((part) => part[0]).join("")}</span><div><strong>{profile.name}</strong><small>{profile.owner ? "Owner & Performance Analyst" : "Performance Analyst"}</small></div><i>→</i></button>)}</div><small className="ras-locked-brand">Rugby Analysis Suite branding remains locked across all profiles.</small></section></div>;
   }
 
+  function ReliabilityModals() {
+    return <>
+      {recoveryCandidate && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Recovered Session</p><h2>{recoveryCandidate.saved.matchName || "Previous match"}{recoveryCandidate.saved.opposition ? ` vs ${recoveryCandidate.saved.opposition}` : ""}</h2><p>We found an autosaved session from {recoveryCandidate.saved.savedAt ? new Date(recoveryCandidate.saved.savedAt).toLocaleString() : "your previous analysis"}.</p><div className="recovery-summary"><strong>{recoveryCandidate.saved.events?.length || 0}</strong><span>events recovered</span><strong>{recoveryCandidate.saved.rawVideoName ? "Ready" : "Not loaded"}</strong><span>match footage</span></div><div className="modal-actions"><button className="secondary-btn" onClick={discardRecoveredSession}>Discard</button><button className="primary-btn" onClick={restoreRecoveredSession}>Restore Session</button></div></section></div>}
+      {showExportCheck && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Export Quality Check</p><h2>{exportWarnings.length} item{exportWarnings.length === 1 ? "" : "s"} to review</h2><p>The report can still be exported, but these checks may affect client-facing accuracy.</p><div className="quality-list">{exportWarnings.map((warning) => <div key={warning}><span>!</span><p>{warning}</p></div>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={() => setShowExportCheck(false)}>Return to Analysis</button><button className="primary-btn" onClick={() => { setShowExportCheck(false); exportPDFReport(true); }}>Export Anyway</button></div></section></div>}
+      {showShortcutGuide && <div className="reliability-modal-backdrop" onMouseDown={() => setShowShortcutGuide(false)}><section className="reliability-modal shortcut-guide" onMouseDown={(event) => event.stopPropagation()}><button className="notice-close" onClick={() => setShowShortcutGuide(false)}>×</button><p className="eyebrow">{analystProfile.name}'s Controls</p><h2>Shortcut Cheat Sheet</h2><p>Press <kbd>?</kbd> anywhere to open or close this guide.</p><div className="shortcut-guide-grid">{[
+        ["Playback", [["Play / Pause",keybinds.playPause],["Back 10s",keybinds.seekBack],["Forward 10s",keybinds.seekForward],["Faster",keybinds.speedUp],["Slower",keybinds.speedDown]]],
+        ["Attack Phase", [["Gainline Won",keybinds.gainlineWon],["Neutral",keybinds.gainlineNeutral],["Lost",keybinds.gainlineLost],["Quick Ruck",keybinds.ruckQuick],["Average Ruck",keybinds.ruckAverage],["Slow Ruck",keybinds.ruckSlow],["Complete Phase",keybinds.completePhase]]],
+        ["Defence", [["Tackle Made",keybinds.tackleMade],["Tackle Missed",keybinds.tackleMissed],["Ball Won",keybinds.ballWon],["Penalty Won",keybinds.penaltyWon],["Penalty Conceded",keybinds.penaltyConceded]]],
+      ].map(([title, items]) => <div key={title as string}><h3>{title as string}</h3>{(items as string[][]).map(([label,key]) => <p key={label}><span>{label}</span><kbd>{key}</kbd></p>)}</div>)}</div></section></div>}
+    </>;
+  }
+
   const page = view === "analysis" ? AnalysisPage()
     : view === "compilations" ? CompilationVideosPage()
       : view === "settings" ? SettingsPage()
         : view === "support" ? SupportPage()
           : view === "plays" ? PlaysPage()
             : Home();
-  return <>{page}<ActivityOverlay /><AnalystGate /></>;
+  return <>{page}<ActivityOverlay /><AnalystGate /><ReliabilityModals /></>;
 }

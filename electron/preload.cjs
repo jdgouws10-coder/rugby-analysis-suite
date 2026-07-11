@@ -10,4 +10,16 @@ contextBridge.exposeInMainWorld("electronAPI", {
     ipcRenderer.on("update-progress", listener);
     return () => ipcRenderer.removeListener("update-progress", listener);
   },
+  onCompilationProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("compilation-progress", listener);
+    return () => ipcRenderer.removeListener("compilation-progress", listener);
+  },
+  getAppVersion: () => ipcRenderer.invoke("get-app-version"),
+  checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
+  onUpdateStatus: (callback) => {
+    const listener = (_event, status) => callback(status);
+    ipcRenderer.on("update-status", listener);
+    return () => ipcRenderer.removeListener("update-status", listener);
+  },
 });

@@ -29,8 +29,9 @@ function createWindow() {
   preload: path.join(__dirname, "preload.cjs"),
   nodeIntegration: false,
   contextIsolation: true,
+  sandbox: true,
   webSecurity: false,
-  allowRunningInsecureContent: true,
+  allowRunningInsecureContent: false,
 },
   });
 
@@ -50,6 +51,16 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.3": [
+      "Added genuine per-clip compilation rendering progress.",
+      "Added export quality checks before client PDF generation.",
+      "Added a dynamic keyboard shortcut cheat sheet.",
+      "Added visible autosave recovery with Restore and Discard options.",
+      "Added an in-app Update Centre with manual update checks.",
+      "Added automated GitHub release builds for safer updater assets.",
+      "Improved Electron renderer sandboxing and blocked insecure remote content.",
+      "Removed analyst identity from client-facing PDF reports.",
+    ],
     "1.3.2": [
       "Added separate JD Gouws and Gabrie Gouws analyst profiles.",
       "Keybinds, appearance, contact details and sessions now save per analyst.",
@@ -106,14 +117,17 @@ function setupAutoUpdater() {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  const sendUpdateStatus = (state, message, version) => mainWindow?.webContents.send("update-status", { state, message, version });
 
   autoUpdater.on("download-progress", (progress) => {
+    sendUpdateStatus("downloading", `Downloading update… ${Math.round(progress.percent)}%`);
     if (!mainWindow) return;
     mainWindow.setProgressBar(Math.max(0, Math.min(1, progress.percent / 100)));
     mainWindow.webContents.send("update-progress", { percent: progress.percent, transferred: progress.transferred, total: progress.total });
   });
 
   autoUpdater.on("update-available", async (info) => {
+    sendUpdateStatus("available", `Version ${info.version} is available.`, info.version);
     const result = await dialog.showMessageBox(mainWindow, {
       type: "info",
       title: "Update Available",
@@ -126,8 +140,10 @@ function setupAutoUpdater() {
 
     if (result.response === 0) autoUpdater.downloadUpdate();
   });
+  autoUpdater.on("update-not-available", (info) => sendUpdateStatus("up-to-date", `You are running the latest version (${info.version}).`, info.version));
 
   autoUpdater.on("update-downloaded", async () => {
+    sendUpdateStatus("ready", "Update downloaded and ready to install.");
     if (mainWindow) {
       mainWindow.setProgressBar(-1);
       mainWindow.webContents.send("update-progress", { percent: 100 });
@@ -146,14 +162,22 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on("error", (error) => {
+    sendUpdateStatus("error", error.message || "Update check failed.");
     if (mainWindow) mainWindow.setProgressBar(-1);
     console.error("Auto updater error:", error);
   });
 
   setTimeout(() => {
+    sendUpdateStatus("checking", "Checking for updates…");
     autoUpdater.checkForUpdates().catch((error) => console.error("Update check failed:", error));
   }, 3000);
 }
+
+ipcMain.handle("get-app-version", () => app.getVersion());
+ipcMain.handle("check-for-updates", async () => {
+  if (!app.isPackaged) return { success: false, message: "Update checks are available in the installed app." };
+  try { await autoUpdater.checkForUpdates(); return { success: true }; } catch (error) { return { success: false, message: error.message }; }
+});
 
 function runFFmpeg(args) {
   return new Promise((resolve, reject) => {
@@ -338,6 +362,8 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
 
   const outputFolder = folderResult.filePaths[0];
   const outputs = [];
+  const totalClips = groups.reduce((total, group) => total + group.clips.length, 0);
+  let completedClips = 0;
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), "rugby-compilation-"));
 
   try {
@@ -350,6 +376,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
       const clipPaths = [];
 
       for (let i = 0; i < sortedClips.length; i += 1) {
+        _event.sender.send("compilation-progress", { group: group.type, clip: i + 1, groupClips: sortedClips.length, completed: completedClips, total: totalClips, percent: totalClips ? (completedClips / totalClips) * 100 : 0 });
         const clip = sortedClips[i];
         const duration = Math.max(1, Number(clip.rawEnd) - Number(clip.rawStart));
         const segmentPath = path.join(groupTempDir, `segment-${String(i + 1).padStart(3, "0")}.mp4`);
@@ -380,6 +407,8 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
         ]);
 
         clipPaths.push(segmentPath);
+        completedClips += 1;
+        _event.sender.send("compilation-progress", { group: group.type, clip: i + 1, groupClips: sortedClips.length, completed: completedClips, total: totalClips, percent: totalClips ? (completedClips / totalClips) * 100 : 100 });
       }
 
       const listPath = path.join(groupTempDir, "concat-list.txt");
@@ -390,6 +419,8 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
       await runFFmpeg(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]);
       outputs.push(outputPath);
     }
+
+    _event.sender.send("compilation-progress", { completed: totalClips, total: totalClips, percent: 100, done: true });
 
     return { success: true, outputs };
   } catch (error) {
