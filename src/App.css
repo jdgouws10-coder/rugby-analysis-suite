@@ -433,6 +433,117 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 .complete-phase-btn:disabled { opacity: 0.36; cursor: not-allowed; }
 
+.kick-flow-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(126, 217, 87, 0.16);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.kick-flow-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.kick-flow-head .eyebrow { margin: 0; }
+.kick-guidance { margin: 0; color: var(--muted); font-size: 12px; }
+.kick-guidance strong { color: var(--green); }
+
+.button-grid button.selected {
+  border-color: var(--green) !important;
+  background: rgba(126, 217, 87, 0.22) !important;
+  box-shadow: 0 0 0 2px rgba(126, 217, 87, 0.12);
+}
+
+.active-action-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 16px;
+  background: rgba(0, 0, 0, 0.22);
+}
+
+.active-action-tabs button {
+  min-height: 40px;
+  border: 1px solid transparent;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--muted);
+  font-weight: 900;
+}
+
+.active-action-tabs button.active {
+  border-color: rgba(126, 217, 87, 0.34);
+  background: rgba(126, 217, 87, 0.17);
+  color: #fff;
+}
+
+.logging-step-card,
+.restart-outcome-step {
+  display: grid;
+  gap: 12px;
+}
+
+.phase-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  gap: 9px;
+}
+
+.cancel-attack-btn {
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-transform: uppercase;
+}
+
+.cancel-attack-btn:hover { color: #fca5a5; }
+
+.inline-zone-selector {
+  display: grid;
+  gap: 7px;
+}
+
+.inline-zone-buttons {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.inline-zone-buttons button {
+  min-height: 34px;
+  padding: 6px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.inline-zone-buttons button.active {
+  border-color: var(--green);
+  background: rgba(126, 217, 87, 0.2);
+  color: #fff;
+}
+
+@media (max-width: 700px) {
+  .inline-zone-buttons { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
 .analysis-right {
   grid-template-rows: auto minmax(320px, 1fr) !important;
 }

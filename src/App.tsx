@@ -34,13 +34,16 @@ type NoticeType = "success" | "warning" | "error" | "info";
 type Panel = "attack" | "defence";
 type PanelSwitching = "automatic" | "manual";
 type AnalysisLevel = "basic" | "standard" | "detailed";
-type EventCategory = "attack" | "set-piece" | "kick" | "defence" | "maul";
+type EventCategory = "attack" | "set-piece" | "kick" | "defence" | "maul" | "restart";
 type GainlineResult = "Won" | "Neutral" | "Lost";
 type RuckSpeed = "Quick" | "Average" | "Slow";
+type KickType = "Exit" | "Contestable" | "Clearance";
+type AttackAction = "phase" | "finish" | "kick";
 
 type PhasePerformance = {
   gainline: GainlineResult;
   ruckSpeed: RuckSpeed;
+  zone?: string;
 };
 
 type Notice = {
@@ -62,6 +65,10 @@ type EventLog = {
   reason?: string;
   note?: string;
   phasePerformance?: PhasePerformance[];
+  kickType?: KickType;
+  endZone?: string;
+  goldZoneEntry?: boolean;
+  goldZoneOutcome?: string;
 };
 
 type ClipGroup = {
@@ -89,9 +96,9 @@ type EditableEvent = {
 };
 
 const pitchZones = ["Opp 22", "Opp Half", "Midfield", "Own Half", "Own 22"];
-const attackTypes = ["Set Piece", "Transition", "Kick Return", "Maul"];
-const successfulAttackOutcomes = ["Penalty Won", "3 Points", "5 Points", "7 Points", "Held Up – Retain Ball"];
-const goldZoneSuccessOutcomes = ["3 Points", "5 Points", "7 Points"];
+const attackTypes = ["Set Piece", "Transition", "Kick Return", "Penalty Tap", "Maul"];
+const successfulAttackOutcomes = ["Penalty Won", "Try Scored", "3 Points Taken", "Held Up – Retain Ball", "Contestable Kick Regained", "Successful Exit", "Positive Clearance"];
+const goldZoneSuccessOutcomes = ["Try Scored", "3 Points Taken"];
 
 const ballLostReasons = [
   "Knock-on",
@@ -151,19 +158,20 @@ const clipTypeOptions = [
   "Kick Return Attack",
   "Maul Attack",
   "Penalty Won",
-  "3 Points",
-  "5 Points",
-  "7 Points",
+  "Try Scored",
+  "3 Points Taken",
   "Ball Lost",
   "Held Up – Retain Ball",
   "Lineout Won",
   "Lineout Lost",
   "Scrum Won",
   "Scrum Lost",
-  "Kick Regained",
-  "Kick Lost",
-  "Good Exit",
-  "Bad Exit",
+  "Contestable Kick Regained",
+  "Contestable Kick Lost",
+  "Successful Exit",
+  "Failed Exit",
+  "Positive Clearance",
+  "Poor Clearance",
   "Tackle Made",
   "Tackle Missed",
   "Ball Won",
@@ -190,10 +198,15 @@ const clipPaddingPresets: {
   { id: "deep", title: "Deep Analysis", description: "Longer build-up and follow-up.", before: 30, after: 10 },
 ];
 
-const attackOutcomeOptions = ["Penalty Won", "3 Points", "5 Points", "7 Points", "Ball Lost", "Held Up – Retain Ball"];
+const attackOutcomeOptions = ["Penalty Won", "Penalty Conceded", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"];
 const defenceEventOptions = ["Tackle Made", "Tackle Missed", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Penalty Won", "Penalty Conceded", "Try Conceded"];
 const setPieceEventOptions = ["Lineout Won", "Lineout Lost", "Scrum Won", "Scrum Lost"];
-const kickOutcomeOptions = ["Good Exit", "Bad Exit", "Kick Regained", "Kick Lost"];
+const kickOutcomeOptions = ["Successful Exit", "Failed Exit", "Charged Down", "Contestable Kick Regained", "Contestable Kick Lost", "Penalty Won", "Into Touch", "Positive Clearance", "Neutral Clearance", "Poor Clearance", "Direct Into Touch"];
+const kickOutcomesByType: Record<KickType, string[]> = {
+  Exit: ["Successful Exit", "Failed Exit", "Charged Down"],
+  Contestable: ["Contestable Kick Regained", "Contestable Kick Lost", "Penalty Won", "Into Touch"],
+  Clearance: ["Positive Clearance", "Neutral Clearance", "Poor Clearance", "Direct Into Touch"],
+};
 
 const maulOutcomeOptions = ["Maul Retained", "Maul Penalty Won", "Maul Try", "Maul Sacked", "Maul Lost"];
 
@@ -204,6 +217,7 @@ function attackTypeFromEvent(event: EventLog) {
 function reasonOptionsForEdit(category: EventCategory, eventName: string, outcome: string) {
   if (category === "attack" && outcome === "Ball Lost") return ballLostReasons;
   if (category === "attack" && outcome === "Penalty Won") return penaltyReasons;
+  if (category === "attack" && outcome === "Penalty Conceded") return penaltyConcededReasons;
   if (category === "defence" && eventName === "Ball Won") return ballWonReasons;
   if (category === "defence" && eventName === "Penalty Won") return penaltyReasons;
   if (category === "defence" && eventName === "Penalty Conceded") return penaltyConcededReasons;
@@ -244,6 +258,11 @@ function average(values: number[]) {
   return (values.reduce((sum, value) => sum + value, 0) / values.length).toFixed(1);
 }
 
+function zoneProgression(event: EventLog) {
+  const zones = [event.zone, ...(event.phasePerformance || []).map((phase) => phase.zone || ""), event.endZone || ""].filter(Boolean);
+  return zones.filter((zone, index) => index === 0 || zone !== zones[index - 1]).join(" → ") || event.zone;
+}
+
 function safeFileName(value: string) {
   return String(value || "rugby-analysis")
     .trim()
@@ -264,6 +283,7 @@ function toFileUrl(filePath: string) {
 
 function clipLabel(event: EventLog) {
   const reason = event.reason ? ` • ${event.reason}` : "";
+  if (event.kickType) return `${event.kickType} Kick • ${event.zone}${event.endZone ? ` to ${event.endZone}` : ""} • ${event.outcome}${reason}`;
   if (event.category === "attack") return `${event.attackType} Attack • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "kick") return `Kick Event • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "defence") return `${event.event} • ${event.zone}${reason}`;
@@ -272,12 +292,12 @@ function clipLabel(event: EventLog) {
 }
 
 function matchesClipType(event: EventLog, type: string) {
-  if (type === "Gold Zone Entries") return event.category === "attack" && event.zone === "Opp 22";
+  if (type === "Gold Zone Entries") return event.category === "attack" && (event.goldZoneEntry === true || (event.goldZoneEntry === undefined && event.zone === "Opp 22"));
   if (type.endsWith("Attack")) return event.category === "attack" && event.attackType === type.replace(" Attack", "");
-  if (["Penalty Won", "3 Points", "5 Points", "7 Points", "Ball Lost", "Held Up – Retain Ball"].includes(type)) {
+  if (["Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"].includes(type)) {
     return event.outcome === type;
   }
-  if (["Kick Regained", "Kick Lost", "Good Exit", "Bad Exit"].includes(type)) return event.category === "kick" && event.outcome === type;
+  if (kickOutcomeOptions.includes(type)) return (event.category === "kick" || Boolean(event.kickType)) && event.outcome === type;
   if (type === "Opponent Lineout Stolen" || type === "Opponent Scrum Stolen") return event.event === type || event.outcome === type;
   return event.event === type || event.outcome === type;
 }
@@ -295,8 +315,8 @@ function totalGroupDuration(group: { clips: { rawStart: number; rawEnd: number }
 
 function eventTone(event: EventLog) {
   const outcome = event.outcome || event.event;
-  if (["Penalty Won", "3 Points", "5 Points", "7 Points", "Kick Regained", "Good Exit", "Lineout Won", "Scrum Won", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Tackle Made", "Maul Try", "Maul Penalty Won", "Maul Retained", "Held Up – Retain Ball"].includes(outcome)) return "positive";
-  if (["Ball Lost", "Kick Lost", "Bad Exit", "Lineout Lost", "Scrum Lost", "Penalty Conceded", "Tackle Missed", "Try Conceded", "Maul Lost", "Maul Sacked"].includes(outcome)) return "negative";
+  if (["Penalty Won", "Try Scored", "3 Points Taken", "Contestable Kick Regained", "Successful Exit", "Positive Clearance", "Lineout Won", "Scrum Won", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Opposition Held Up", "Tackle Made", "Maul Try", "Maul Penalty Won", "Maul Retained", "Held Up – Retain Ball", "Possession Gained"].includes(outcome)) return "positive";
+  if (["Ball Lost", "Contestable Kick Lost", "Failed Exit", "Charged Down", "Poor Clearance", "Direct Into Touch", "Lineout Lost", "Scrum Lost", "Penalty Conceded", "Tackle Missed", "Try Conceded", "Maul Lost", "Maul Sacked", "Possession Lost"].includes(outcome)) return "negative";
   return "neutral";
 }
 
@@ -442,6 +462,11 @@ export default function App() {
   const [phasePerformance, setPhasePerformance] = useState<PhasePerformance[]>([]);
   const [pendingGainline, setPendingGainline] = useState<GainlineResult | null>(null);
   const [pendingRuckSpeed, setPendingRuckSpeed] = useState<RuckSpeed | null>(null);
+  const [activeKickType, setActiveKickType] = useState<KickType | null>(null);
+  const [activeRestart, setActiveRestart] = useState<string | null>(null);
+  const [possessionInGoldZone, setPossessionInGoldZone] = useState(false);
+  const [activeGoldZoneEntry, setActiveGoldZoneEntry] = useState(false);
+  const [attackAction, setAttackAction] = useState<AttackAction>("phase");
   const [maulActive, setMaulActive] = useState(false);
   const [maulStartZone, setMaulStartZone] = useState("");
   const [maulPhaseCount, setMaulPhaseCount] = useState(0);
@@ -476,17 +501,17 @@ export default function App() {
   const scrumsLost = events.filter((event) => event.event === "Scrum Lost").length;
   const totalLineouts = lineoutsWon + lineoutsLost;
   const totalScrums = scrumsWon + scrumsLost;
-  const kickEvents = events.filter((event) => event.category === "kick");
-  const contestableKicks = kickEvents.filter((event) => event.outcome === "Kick Regained" || event.outcome === "Kick Lost");
-  const kickRegained = contestableKicks.filter((event) => event.outcome === "Kick Regained").length;
-  const exitKicks = kickEvents.filter((event) => event.outcome === "Good Exit" || event.outcome === "Bad Exit");
-  const goodExits = exitKicks.filter((event) => event.outcome === "Good Exit").length;
-  const goldZoneEntries = attacks.filter((event) => event.zone === "Opp 22");
-  const successfulGoldZoneEntries = goldZoneEntries.filter((event) => goldZoneSuccessOutcomes.includes(event.outcome || ""));
+  const kickEvents = events.filter((event) => event.category === "kick" || Boolean(event.kickType));
+  const contestableKicks = kickEvents.filter((event) => event.kickType === "Contestable" || event.outcome === "Kick Regained" || event.outcome === "Kick Lost");
+  const kickRegained = contestableKicks.filter((event) => event.outcome === "Contestable Kick Regained" || event.outcome === "Kick Regained").length;
+  const exitKicks = kickEvents.filter((event) => event.kickType === "Exit" || event.outcome === "Good Exit" || event.outcome === "Bad Exit");
+  const goodExits = exitKicks.filter((event) => event.outcome === "Successful Exit" || event.outcome === "Good Exit").length;
+  const goldZoneEntries = attacks.filter((event) => event.goldZoneEntry === true || (event.goldZoneEntry === undefined && event.zone === "Opp 22"));
+  const successfulGoldZoneEntries = goldZoneEntries.filter((event) => goldZoneSuccessOutcomes.includes(event.goldZoneOutcome || event.outcome || ""));
   const goldZonePoints = goldZoneEntries.reduce((total, event) => {
-    if (event.outcome === "3 Points") return total + 3;
-    if (event.outcome === "5 Points") return total + 5;
-    if (event.outcome === "7 Points") return total + 7;
+    const outcome = event.goldZoneOutcome || event.outcome;
+    if (outcome === "3 Points Taken" || outcome === "3 Points") return total + 3;
+    if (outcome === "Try Scored" || outcome === "5 Points" || outcome === "7 Points") return total + 5;
     return total;
   }, 0);
   const tackleMade = defenceEvents.filter((event) => event.event === "Tackle Made").length;
@@ -650,8 +675,32 @@ export default function App() {
     addEvent({ category: "set-piece", event: eventName });
   }
 
-  function addKick(outcome: string) {
-    addEvent({ category: "kick", event: "Kick Event", outcome });
+  function addKick(outcome: string, kickType: KickType) {
+    if (attackActive) {
+      finishAttack(outcome, undefined, kickType);
+      return;
+    }
+    addEvent({ category: "kick", event: `${kickType} Kick`, outcome, kickType, endZone: selectedZone });
+    setActiveKickType(null);
+    setAttackAction("phase");
+    if (outcome !== "Contestable Kick Regained") setPossessionInGoldZone(false);
+  }
+
+  function addRestart(outcome: string) {
+    if (!activeRestart) return;
+    addEvent({ category: "restart", event: activeRestart, outcome });
+    setActiveRestart(null);
+    setPossessionInGoldZone(false);
+    if (outcome === "Possession Gained") autoSwitchPanel("attack", `${activeRestart}: possession gained.`);
+    if (outcome === "Possession Lost") autoSwitchPanel("defence", `${activeRestart}: possession lost.`);
+  }
+
+  function selectZone(zone: string) {
+    setSelectedZone(zone);
+    if (attackActive && zone === "Opp 22" && !possessionInGoldZone) {
+      setPossessionInGoldZone(true);
+      setActiveGoldZoneEntry(true);
+    }
   }
 
   function startAttack(type: string) {
@@ -663,17 +712,21 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setActiveKickType(null);
+    const isNewGoldZoneEntry = selectedZone === "Opp 22" && !possessionInGoldZone;
+    setActiveGoldZoneEntry(isNewGoldZoneEntry);
+    if (isNewGoldZoneEntry) setPossessionInGoldZone(true);
   }
 
   function completePhase() {
     if (!pendingGainline || !pendingRuckSpeed) return;
-    setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed: pendingRuckSpeed }]);
+    setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed: pendingRuckSpeed, zone: selectedZone }]);
     setPhaseCount((prev) => prev + 1);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
   }
 
-  function finishAttack(outcome: string, reason?: string) {
+  function finishAttack(outcome: string, reason?: string, kickType?: KickType) {
     if (!attackActive) return;
     addEvent({
       category: "attack",
@@ -684,7 +737,18 @@ export default function App() {
       reason,
       zone: attackStartZone,
       phasePerformance,
+      kickType,
+      endZone: selectedZone,
+      goldZoneEntry: activeGoldZoneEntry,
     });
+    const closesGoldZonePossession = !["Penalty Won", "Held Up – Retain Ball", "Contestable Kick Regained"].includes(outcome);
+    if (possessionInGoldZone && closesGoldZonePossession) {
+      setEvents((prev) => {
+        const entryIndex = prev.findIndex((event) => event.goldZoneEntry && !event.goldZoneOutcome);
+        if (entryIndex === -1) return prev;
+        return prev.map((event, index) => index === entryIndex ? { ...event, goldZoneOutcome: outcome } : event);
+      });
+    }
     setAttackActive(false);
     setAttackStartZone("");
     setCurrentAttackType("");
@@ -692,12 +756,21 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setActiveKickType(null);
+    setActiveGoldZoneEntry(false);
+    setAttackAction("phase");
+    const possessionRetained = !closesGoldZonePossession;
+    if (!possessionRetained) setPossessionInGoldZone(false);
     if (outcome === "Ball Lost") autoSwitchPanel("defence", "Ball Lost was tagged.");
+    if (["Penalty Conceded", "Contestable Kick Lost", "Failed Exit", "Charged Down", "Poor Clearance", "Direct Into Touch"].includes(outcome)) autoSwitchPanel("defence", `${outcome} was tagged.`);
   }
 
   function addDefenceEvent(eventName: string, reason?: string) {
     addEvent({ category: "defence", event: eventName, outcome: eventName, reason });
-    if (eventName === "Ball Won" || eventName === "Penalty Won") autoSwitchPanel("attack", `${eventName} was tagged.`);
+    if (eventName === "Ball Won" || eventName === "Penalty Won" || eventName === "Opposition Held Up") {
+      setPossessionInGoldZone(false);
+      autoSwitchPanel("attack", `${eventName} was tagged.`);
+    }
   }
 
   function startMaul() {
@@ -712,6 +785,9 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setActiveKickType(null);
+    setActiveRestart(null);
+    setActiveGoldZoneEntry(false);
   }
 
   function finishMaul(outcome: string) {
@@ -760,6 +836,13 @@ export default function App() {
     setGeneratedClips([]);
   }
 
+  function undoLastPhase() {
+    setPhasePerformance((prev) => prev.slice(0, -1));
+    setPhaseCount((prev) => Math.max(0, prev - 1));
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
+  }
+
   function cancelCurrentEvent() {
     setAttackActive(false);
     setAttackStartZone("");
@@ -768,6 +851,10 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setActiveKickType(null);
+    setActiveRestart(null);
+    setActiveGoldZoneEntry(false);
+    setAttackAction("phase");
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
@@ -799,6 +886,14 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setActiveKickType(null);
+    setActiveRestart(null);
+    setPossessionInGoldZone(false);
+    setActiveGoldZoneEntry(false);
+    setAttackAction("phase");
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
@@ -816,7 +911,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.3.0",
+      version: "1.3.1",
       matchName,
       opposition,
       competition,
@@ -963,7 +1058,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.0", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.1", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1440,7 +1535,7 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.0</span>
+          <span className="version-pill">v1.3.1</span>
         </div>
       </header>
     );
@@ -1572,7 +1667,7 @@ export default function App() {
                 </div>
                 <div className="quick-zone-buttons">
                   {pitchZones.map((zone) => (
-                    <button key={zone} type="button" className={selectedZone === zone ? "active" : ""} onClick={() => setSelectedZone(zone)}>
+                    <button key={zone} type="button" className={selectedZone === zone ? "active" : ""} onClick={() => selectZone(zone)}>
                       {zone}
                     </button>
                   ))}
@@ -1602,6 +1697,17 @@ export default function App() {
     );
   }
 
+  function InlineZoneSelector({ label = "Current Zone" }: { label?: string }) {
+    return (
+      <div className="inline-zone-selector">
+        <p className="phase-label">{label}</p>
+        <div className="inline-zone-buttons">
+          {pitchZones.map((zone) => <button key={zone} className={selectedZone === zone ? "active" : ""} onClick={() => selectZone(zone)}>{zone}</button>)}
+        </div>
+      </div>
+    );
+  }
+
   function AttackControls() {
     return (
       <div className="control-stack">
@@ -1618,37 +1724,56 @@ export default function App() {
             <div className="active-strip">
               <span>Type: {currentAttackType}</span><span>Zone: {attackStartZone}</span><span>Phases: {phaseCount}</span>
             </div>
-            <button className="secondary-btn small back-step-btn" onClick={cancelCurrentEvent}>← Back</button>
-            <div className="phase-performance-card">
+            <div className="active-action-tabs">
+              <button className={attackAction === "phase" ? "active" : ""} onClick={() => setAttackAction("phase")}>Log Phase</button>
+              <button className={attackAction === "finish" ? "active" : ""} onClick={() => setAttackAction("finish")}>Finish Attack</button>
+              <button className={attackAction === "kick" ? "active" : ""} onClick={() => setAttackAction("kick")}>Kick</button>
+            </div>
+
+            {attackAction === "phase" && <div className="phase-performance-card">
               <div className="phase-performance-head">
                 <div><p className="eyebrow">Phase {phaseCount + 1}</p><h3>Gainline &amp; Ruck Speed</h3></div>
-                <span>{pendingGainline && pendingRuckSpeed ? "Ready" : "Select both"}</span>
+                <span>{pendingGainline && pendingRuckSpeed ? `${selectedZone} • Ready` : selectedZone}</span>
               </div>
+              <InlineZoneSelector label="Phase Zone" />
               <p className="phase-label">Gainline</p>
               <div className="phase-choice-grid gainline-choices">
-                {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => (
-                  <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}</button>
-                ))}
+                {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}</button>)}
               </div>
               <p className="phase-label">Ruck Speed</p>
               <div className="phase-choice-grid ruck-choices">
-                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => (
-                  <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}</button>
-                ))}
+                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}</button>)}
               </div>
-              <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase</button>
-            </div>
-            <div className="button-grid six responsive-six">
-              <button onClick={() => finishAttack("Penalty Won")}>Penalty Won</button>
-              <button onClick={() => finishAttack("3 Points")}>3 Points</button>
-              <button onClick={() => finishAttack("5 Points")}>5 Points</button>
-              <button onClick={() => finishAttack("7 Points")}>7 Points</button>
-              <button onClick={() => finishAttack("Held Up – Retain Ball")}>Held Up – Retain</button>
-            </div>
-            <div className="reason-row">
-              <label>Ball Lost Reason<select value={ballLostReason} onChange={(event) => setBallLostReason(event.target.value)}>{ballLostReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-              <button className="danger-btn" onClick={() => finishAttack("Ball Lost", ballLostReason)}>Ball Lost</button>
-            </div>
+              <div className="phase-action-row">
+                <button className="secondary-btn" disabled={!phaseCount} onClick={undoLastPhase}>Undo Last Phase</button>
+                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase</button>
+              </div>
+            </div>}
+
+            {attackAction === "finish" && <div className="logging-step-card">
+              <button className="secondary-btn small back-step-btn" onClick={() => setAttackAction("phase")}>← Back to Phase</button>
+              <div className="button-grid two">
+                <button onClick={() => finishAttack("Penalty Won")}>Penalty Won</button>
+                <button onClick={() => finishAttack("Try Scored")}>Try Scored</button>
+                <button onClick={() => finishAttack("3 Points Taken")}>3 Points Taken</button>
+                <button onClick={() => finishAttack("Held Up – Retain Ball")}>Held Up – Retain</button>
+              </div>
+              <div className="reason-row">
+                <label>Ball Lost Reason<select value={ballLostReason} onChange={(event) => setBallLostReason(event.target.value)}>{ballLostReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
+                <button className="danger-btn" onClick={() => finishAttack("Ball Lost", ballLostReason)}>Ball Lost</button>
+              </div>
+              <div className="reason-row">
+                <label>Penalty Conceded Reason<select value={penaltyConcededReason} onChange={(event) => setPenaltyConcededReason(event.target.value)}>{penaltyConcededReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
+                <button className="danger-btn" onClick={() => finishAttack("Penalty Conceded", penaltyConcededReason)}>Penalty Conceded</button>
+              </div>
+            </div>}
+
+            {attackAction === "kick" && <div className="logging-step-card">
+              <button className="secondary-btn small back-step-btn" onClick={() => { setActiveKickType(null); setAttackAction("phase"); }}>← Back to Phase</button>
+              <KickFlowControls />
+            </div>}
+
+            <button className="cancel-attack-btn" onClick={cancelCurrentEvent}>Cancel Current Attack</button>
           </>
         ) : (
           <>
@@ -1658,9 +1783,7 @@ export default function App() {
             <div className="sub-control-grid">
               <div>
                 <p className="eyebrow">Kicking</p>
-                <div className="button-grid two">
-                  {selectedZone === "Own 22" ? <><button onClick={() => addKick("Good Exit")}>Good Exit</button><button className="negative" onClick={() => addKick("Bad Exit")}>Bad Exit</button></> : <><button onClick={() => addKick("Kick Regained")}>Regained</button><button className="negative" onClick={() => addKick("Kick Lost")}>Lost</button></>}
-                </div>
+                <KickFlowControls />
               </div>
               <div>
                 <p className="eyebrow">Set Piece</p>
@@ -1671,6 +1794,13 @@ export default function App() {
                   <button className="negative-soft" onClick={() => addSetPiece("Scrum Lost")}>Scrum Lost</button>
                 </div>
               </div>
+            </div>
+            <div className="maul-box">
+              <p className="eyebrow">Kickoff / Restart</p>
+              <div className="button-grid three">
+                {["Kickoff Sent", "Kickoff Received", "22m Dropout Sent", "22m Dropout Received"].map((restart) => <button key={restart} className={activeRestart === restart ? "selected" : ""} onClick={() => setActiveRestart(restart)}>{restart}</button>)}
+              </div>
+              {activeRestart && <div className="restart-outcome-step"><button className="secondary-btn small back-step-btn" onClick={() => setActiveRestart(null)}>← Back</button><div className="button-grid two"><button onClick={() => addRestart("Possession Gained")}>Possession Gained</button><button className="negative" onClick={() => addRestart("Possession Lost")}>Possession Lost</button></div></div>}
             </div>
             {analysisLevel !== "basic" && (
               <div className="maul-box">
@@ -1703,17 +1833,39 @@ export default function App() {
     );
   }
 
+  function KickFlowControls() {
+    return (
+      <div className="kick-flow-card">
+        <div className="kick-flow-head"><p className="eyebrow">Kick Type</p>{activeKickType && <button className="secondary-btn small" onClick={() => setActiveKickType(null)}>Change</button>}</div>
+        {!activeKickType ? (
+          <div className="button-grid three">
+            {(["Exit", "Contestable", "Clearance"] as KickType[]).map((type) => <button key={type} onClick={() => setActiveKickType(type)}>{type}</button>)}
+          </div>
+        ) : (
+          <>
+            <p className="kick-guidance">{activeKickType} kick • landing/end zone: <strong>{selectedZone}</strong></p>
+            <div className="button-grid two">
+              {kickOutcomesByType[activeKickType].map((outcome) => <button key={outcome} className={["Failed Exit", "Charged Down", "Contestable Kick Lost", "Poor Clearance", "Direct Into Touch"].includes(outcome) ? "negative" : ""} onClick={() => addKick(outcome, activeKickType)}>{outcome}</button>)}
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
   function DefenceControls() {
     return (
       <div className="control-stack">
         <div className="panel-head compact">
           <div><p className="eyebrow">Defence Panel</p><h2>Defensive Actions</h2></div>
         </div>
+        <InlineZoneSelector label="Action Zone" />
         <div className="button-grid two">
           <button onClick={() => addDefenceEvent("Tackle Made")}>Tackle Made</button>
           <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed</button>
           <button onClick={() => addDefenceEvent("Opponent Lineout Stolen")}>Opponent Lineout Stolen</button>
           <button onClick={() => addDefenceEvent("Opponent Scrum Stolen")}>Opponent Scrum Stolen</button>
+          <button onClick={() => addDefenceEvent("Opposition Held Up")}>Opposition Held Up</button>
           <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded</button>
         </div>
         <div className="reason-grid">
@@ -1735,8 +1887,8 @@ export default function App() {
           <div className={`event-row ${eventTone(event)}`} key={event.id}>
             <button onClick={() => jumpTo(event.seconds)}>{event.time}</button>
             <strong>{event.category === "attack" ? `${event.attackType} Attack` : event.event}</strong>
-            <span>{event.zone}</span>
-            <span>{event.category === "attack" ? `${event.phases || 0} phases • ${event.outcome || "No outcome"}` : event.outcome || event.category}</span>
+            <span title={event.category === "attack" ? zoneProgression(event) : event.zone}>{event.category === "attack" ? zoneProgression(event) : event.zone}</span>
+            <span>{event.category === "attack" ? `${event.phases || 0} phases • ${event.outcome || "No outcome"}${event.kickType ? ` • ${event.kickType} kick to ${event.endZone || event.zone}` : ""}` : event.outcome || event.category}</span>
             <span>{event.reason || "—"}</span>
             <div className="event-actions">
               <button onClick={() => openEditEvent(event)}>Edit</button>

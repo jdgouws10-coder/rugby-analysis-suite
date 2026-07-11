@@ -50,11 +50,15 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
-    "1.3.0": [
+    "1.3.1": [
       "Gainline tracking added to every attacking phase.",
       "Quick, average and slow ruck-speed tracking added.",
       "Gainline and quick-ball metrics added to PDF reports.",
       "Coach Summary now uses gainline and ruck-speed insights.",
+      "Exit, contestable and clearance kick workflows added.",
+      "Kickoff and 22m dropout restart tracking added.",
+      "Penalty Tap, Try Scored and 3 Points Taken workflows added.",
+      "Gold Zone entries now follow possession instead of counting every event.",
       "Analysis workspace streamlined for faster tagging.",
     ],
   };
