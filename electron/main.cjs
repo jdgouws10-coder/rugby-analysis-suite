@@ -37,9 +37,53 @@ function createWindow() {
   mainWindow.setMenuBarVisibility(false);
 
   if (app.isPackaged) {
+    mainWindow.webContents.once("did-finish-load", () => showPatchNotesOnFirstLaunch());
+  }
+
+  if (app.isPackaged) {
     mainWindow.loadFile(path.join(app.getAppPath(), "dist", "index.html"));
   } else {
     mainWindow.loadURL("http://localhost:5173");
+  }
+}
+
+async function showPatchNotesOnFirstLaunch() {
+  const currentVersion = app.getVersion();
+  const notesByVersion = {
+    "1.3.0": [
+      "Gainline tracking added to every attacking phase.",
+      "Quick, average and slow ruck-speed tracking added.",
+      "Gainline and quick-ball metrics added to PDF reports.",
+      "Coach Summary now uses gainline and ruck-speed insights.",
+      "Analysis workspace streamlined for faster tagging.",
+    ],
+  };
+
+  const notes = notesByVersion[currentVersion];
+  if (!notes || !mainWindow) return;
+
+  const statePath = path.join(app.getPath("userData"), "patch-notes-state.json");
+  let lastShownVersion = "";
+
+  try {
+    lastShownVersion = JSON.parse(fs.readFileSync(statePath, "utf8")).lastShownVersion || "";
+  } catch (_) {}
+
+  if (lastShownVersion === currentVersion) return;
+
+  await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: `Rugby Analysis Suite v${currentVersion}`,
+    message: "Update installed successfully",
+    detail: `What's new:\n\n${notes.map((note) => `• ${note}`).join("\n")}`,
+    buttons: ["Start Analysing"],
+    defaultId: 0,
+  });
+
+  try {
+    fs.writeFileSync(statePath, JSON.stringify({ lastShownVersion: currentVersion }, null, 2));
+  } catch (error) {
+    console.error("Could not save patch notes state:", error);
   }
 }
 

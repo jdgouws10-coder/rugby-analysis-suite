@@ -35,6 +35,13 @@ type Panel = "attack" | "defence";
 type PanelSwitching = "automatic" | "manual";
 type AnalysisLevel = "basic" | "standard" | "detailed";
 type EventCategory = "attack" | "set-piece" | "kick" | "defence" | "maul";
+type GainlineResult = "Won" | "Neutral" | "Lost";
+type RuckSpeed = "Quick" | "Average" | "Slow";
+
+type PhasePerformance = {
+  gainline: GainlineResult;
+  ruckSpeed: RuckSpeed;
+};
 
 type Notice = {
   title: string;
@@ -54,6 +61,7 @@ type EventLog = {
   outcome?: string;
   reason?: string;
   note?: string;
+  phasePerformance?: PhasePerformance[];
 };
 
 type ClipGroup = {
@@ -431,6 +439,9 @@ export default function App() {
   const [attackStartZone, setAttackStartZone] = useState("");
   const [currentAttackType, setCurrentAttackType] = useState("");
   const [phaseCount, setPhaseCount] = useState(0);
+  const [phasePerformance, setPhasePerformance] = useState<PhasePerformance[]>([]);
+  const [pendingGainline, setPendingGainline] = useState<GainlineResult | null>(null);
+  const [pendingRuckSpeed, setPendingRuckSpeed] = useState<RuckSpeed | null>(null);
   const [maulActive, setMaulActive] = useState(false);
   const [maulStartZone, setMaulStartZone] = useState("");
   const [maulPhaseCount, setMaulPhaseCount] = useState(0);
@@ -487,6 +498,11 @@ export default function App() {
   const opponentLineoutsStolen = defenceEvents.filter((event) => event.event === "Opponent Lineout Stolen" || event.outcome === "Opponent Lineout Stolen").length;
   const opponentScrumsStolen = defenceEvents.filter((event) => event.event === "Opponent Scrum Stolen" || event.outcome === "Opponent Scrum Stolen").length;
   const triesConceded = defenceEvents.filter((event) => event.event === "Try Conceded" || event.outcome === "Try Conceded").length;
+  const allAttackPhases = attacks.flatMap((event) => event.phasePerformance || []);
+  const gainlineWon = allAttackPhases.filter((phase) => phase.gainline === "Won").length;
+  const gainlineSuccess = Number(percent(gainlineWon, allAttackPhases.length));
+  const quickRucks = allAttackPhases.filter((phase) => phase.ruckSpeed === "Quick").length;
+  const quickBallRate = Number(percent(quickRucks, allAttackPhases.length));
 
   const totalPreviewClips = generatedClips.reduce((total, group) => total + group.clips.length, 0);
   const totalPreviewDuration = generatedClips.reduce((total, group) => total + totalGroupDuration(group), 0);
@@ -644,6 +660,17 @@ export default function App() {
     setAttackStartZone(selectedZone);
     setCurrentAttackType(type);
     setPhaseCount(0);
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
+  }
+
+  function completePhase() {
+    if (!pendingGainline || !pendingRuckSpeed) return;
+    setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed: pendingRuckSpeed }]);
+    setPhaseCount((prev) => prev + 1);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
   }
 
   function finishAttack(outcome: string, reason?: string) {
@@ -656,11 +683,15 @@ export default function App() {
       outcome,
       reason,
       zone: attackStartZone,
+      phasePerformance,
     });
     setAttackActive(false);
     setAttackStartZone("");
     setCurrentAttackType("");
     setPhaseCount(0);
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
     if (outcome === "Ball Lost") autoSwitchPanel("defence", "Ball Lost was tagged.");
   }
 
@@ -678,6 +709,9 @@ export default function App() {
     setAttackStartZone("");
     setCurrentAttackType("");
     setPhaseCount(0);
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
   }
 
   function finishMaul(outcome: string) {
@@ -731,6 +765,9 @@ export default function App() {
     setAttackStartZone("");
     setCurrentAttackType("");
     setPhaseCount(0);
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
@@ -759,6 +796,9 @@ export default function App() {
     setAttackStartZone("");
     setCurrentAttackType("");
     setPhaseCount(0);
+    setPhasePerformance([]);
+    setPendingGainline(null);
+    setPendingRuckSpeed(null);
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
@@ -776,7 +816,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.2.0",
+      version: "1.3.0",
       matchName,
       opposition,
       competition,
@@ -869,9 +909,13 @@ export default function App() {
     const lineoutValue = Number(percent(lineoutsWon, totalLineouts));
     const scrumValue = Number(percent(scrumsWon, totalScrums));
     const exitValue = Number(percent(goodExits, exitKicks.length));
+    const gainlineValue = gainlineSuccess;
+    const quickBallValue = quickBallRate;
 
     const coachTargets = [
       { label: "Attack Efficiency", value: attackEfficiencyValue, display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%+", meets: attackEfficiencyValue >= 45 || totalAttacks === 0 },
+      { label: "Gainline Success", value: gainlineValue, display: `${gainlineValue.toFixed(1)}%`, target: "65%+", meets: gainlineValue >= 65 || allAttackPhases.length === 0 },
+      { label: "Quick Ball", value: quickBallValue, display: `${quickBallValue.toFixed(1)}%`, target: "55%+", meets: quickBallValue >= 55 || allAttackPhases.length === 0 },
       { label: "Ball Loss Rate", value: ballLossRateValue, display: `${ballLossRateValue.toFixed(1)}%`, target: "Under 18%", meets: ballLossRateValue <= 18 || totalAttacks === 0 },
       { label: "Gold Zone Conversion", value: goldZoneValue, display: `${goldZoneValue.toFixed(1)}%`, target: "60%+", meets: goldZoneValue >= 60 || goldZoneEntries.length === 0 },
       { label: "Tackle Completion", value: tackleCompletionValue, display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%+", meets: tackleCompletionValue >= 88 || (tackleMade + tackleMissed) === 0 },
@@ -889,6 +933,10 @@ export default function App() {
     const penaltiesLost = ballLostReasonBreakdown["Penalty Conceded"] || 0;
 
     if (attackEfficiencyValue >= 45 && totalAttacks > 0) coachSummary.push("Attack efficiency met the recommended target. Review clips to identify which shapes created the cleanest outcomes.");
+    if (gainlineValue >= 65 && allAttackPhases.length > 0) coachSummary.push("The team consistently won the gainline, creating a strong platform for the next phase.");
+    if (gainlineValue < 65 && allAttackPhases.length > 0) coachSummary.push("Gainline success was below target. Review carrier footwork, body height and whether runners received the ball with enough momentum.");
+    if (quickBallValue < 55 && allAttackPhases.length > 0) coachSummary.push("Quick ball was below target. Prioritise first-arriver speed, cleaner presentation and more decisive breakdown support.");
+    if (gainlineValue >= 65 && quickBallValue < 55 && allAttackPhases.length > 0) coachSummary.push("Strong gainline outcomes were not consistently converted into quick ball; improving support arrival should unlock more attacking momentum.");
     if (ballLossRateValue <= 18 && totalAttacks > 0) coachSummary.push("Ball security was within the target range. Keep reinforcing support depth and clear decision-making.");
     if (knockOns > 0) coachSummary.push(`${knockOns} knock-on(s): review carry height, contact skill, pass timing and catch quality under pressure.`);
     if (intercepts > 0) coachSummary.push(`${intercepts} intercept(s): check whether the pass was forced, whether the receiver was flat, and whether the defender was fixed before release.`);
@@ -915,7 +963,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.2.0", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.0", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1024,6 +1072,10 @@ export default function App() {
     addLine("Ball Losses", ballLosses);
     addLine("Ball Loss Rate", `${ballLossRateValue.toFixed(1)}%`);
     addLine("Average Phases Per Attack", average(attacks.map((event) => event.phases || 0)));
+    addLine("Gainline Won", `${gainlineWon} / ${allAttackPhases.length}`);
+    addLine("Gainline Success", `${gainlineValue.toFixed(1)}%`);
+    addLine("Quick Rucks", `${quickRucks} / ${allAttackPhases.length}`);
+    addLine("Quick Ball Rate", `${quickBallValue.toFixed(1)}%`);
 
     addSection("GOLD ZONE");
     addLine("Entries", goldZoneEntries.length);
@@ -1388,7 +1440,7 @@ export default function App() {
         </div>
         <div className="topbar-actions">
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.2.0</span>
+          <span className="version-pill">v1.3.0</span>
         </div>
       </header>
     );
@@ -1567,8 +1619,26 @@ export default function App() {
               <span>Type: {currentAttackType}</span><span>Zone: {attackStartZone}</span><span>Phases: {phaseCount}</span>
             </div>
             <button className="secondary-btn small back-step-btn" onClick={cancelCurrentEvent}>← Back</button>
+            <div className="phase-performance-card">
+              <div className="phase-performance-head">
+                <div><p className="eyebrow">Phase {phaseCount + 1}</p><h3>Gainline &amp; Ruck Speed</h3></div>
+                <span>{pendingGainline && pendingRuckSpeed ? "Ready" : "Select both"}</span>
+              </div>
+              <p className="phase-label">Gainline</p>
+              <div className="phase-choice-grid gainline-choices">
+                {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => (
+                  <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}</button>
+                ))}
+              </div>
+              <p className="phase-label">Ruck Speed</p>
+              <div className="phase-choice-grid ruck-choices">
+                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => (
+                  <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}</button>
+                ))}
+              </div>
+              <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase</button>
+            </div>
             <div className="button-grid six responsive-six">
-              <button onClick={() => setPhaseCount((prev) => prev + 1)}>+ Phase</button>
               <button onClick={() => finishAttack("Penalty Won")}>Penalty Won</button>
               <button onClick={() => finishAttack("3 Points")}>3 Points</button>
               <button onClick={() => finishAttack("5 Points")}>5 Points</button>
