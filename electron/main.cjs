@@ -51,6 +51,11 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.5": [
+      "Restored the official Rugby Analysis Suite desktop and installer icon.",
+      "Removed the redundant standalone kicking menu; kicks remain inside the attack workflow and statistics.",
+      "Improved automated release publishing and updater-file delivery.",
+    ],
     "1.3.4": [
       "Restored the official Rugby Analysis Suite desktop and installer icon.",
       "Improved automated release publishing for future updates.",
