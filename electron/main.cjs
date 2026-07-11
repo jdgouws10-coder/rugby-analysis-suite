@@ -51,6 +51,10 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.4": [
+      "Restored the official Rugby Analysis Suite desktop and installer icon.",
+      "Improved automated release publishing for future updates.",
+    ],
     "1.3.3": [
       "Added genuine per-clip compilation rendering progress.",
       "Added export quality checks before client PDF generation.",
