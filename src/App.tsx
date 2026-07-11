@@ -25,20 +25,45 @@ declare global {
         videoPath: string;
         groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
+      onUpdateProgress?: (callback: (progress: { percent: number; transferred?: number; total?: number }) => void) => () => void;
     };
   }
 }
 
-type View = "home" | "analysis" | "compilations" | "plays" | "support";
+type View = "home" | "analysis" | "compilations" | "plays" | "support" | "settings";
 type NoticeType = "success" | "warning" | "error" | "info";
 type Panel = "attack" | "defence";
 type PanelSwitching = "automatic" | "manual";
-type AnalysisLevel = "basic" | "standard" | "detailed";
 type EventCategory = "attack" | "set-piece" | "kick" | "defence" | "maul" | "restart";
 type GainlineResult = "Won" | "Neutral" | "Lost";
 type RuckSpeed = "Quick" | "Average" | "Slow";
 type KickType = "Exit" | "Contestable" | "Clearance";
 type AttackAction = "phase" | "finish" | "kick";
+type KeybindAction = "playPause" | "seekBack" | "seekForward" | "speedUp" | "speedDown" | "undoEvent" | "attackPanel" | "defencePanel" | "gainlineWon" | "gainlineNeutral" | "gainlineLost" | "ruckQuick" | "ruckAverage" | "ruckSlow" | "completePhase" | "undoPhase" | "finishAttack" | "kick" | "backToPhase" | "tackleMade" | "tackleMissed" | "ballWon" | "penaltyWon" | "penaltyConceded" | "oppositionHeldUp" | "tryConceded";
+type Keybinds = Record<KeybindAction, string>;
+type SettingsTab = "keybinds" | "appearance" | "profile";
+type AppearanceSettings = { accent: string; accent2: string; motion: "off" | "subtle" | "full"; density: "compact" | "comfortable"; backdrop: number; glass: number };
+type AnalystProfile = { name: string; role: string; email: string; phone: string };
+
+const defaultAppearance: AppearanceSettings = { accent: "#7ed957", accent2: "#5cb338", motion: "full", density: "comfortable", backdrop: 72, glass: 82 };
+const defaultProfile: AnalystProfile = { name: "", role: "Performance Analyst", email: "", phone: "" };
+const analystProfiles = [
+  { id: "jd", name: "JD Gouws", role: "Owner & Performance Analyst", owner: true },
+  { id: "gabrie", name: "Gabrie Gouws", role: "Performance Analyst", owner: false },
+] as const;
+
+const defaultKeybinds: Keybinds = {
+  playPause: "Space", seekBack: "ArrowLeft", seekForward: "ArrowRight", speedUp: "ArrowUp", speedDown: "ArrowDown", undoEvent: "Ctrl+Z",
+  attackPanel: "A", defencePanel: "D", gainlineWon: "1", gainlineNeutral: "2", gainlineLost: "3", ruckQuick: "4", ruckAverage: "5", ruckSlow: "6",
+  completePhase: "Enter", undoPhase: "U", finishAttack: "F", kick: "K", backToPhase: "Escape", tackleMade: "1", tackleMissed: "2", ballWon: "3",
+  penaltyWon: "4", penaltyConceded: "5", oppositionHeldUp: "6", tryConceded: "7",
+};
+
+function shortcutFromEvent(event: KeyboardEvent | React.KeyboardEvent) {
+  const base = event.key === " " ? "Space" : event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  const modifiers = [event.ctrlKey ? "Ctrl" : "", event.altKey ? "Alt" : "", event.shiftKey && base.length > 1 ? "Shift" : ""].filter(Boolean);
+  return [...modifiers, base].join("+");
+}
 
 type PhasePerformance = {
   gainline: GainlineResult;
@@ -442,7 +467,10 @@ export default function App() {
   const projectInputRef = useRef<HTMLInputElement | null>(null);
 
   const [view, setView] = useState<View>("home");
+  const [activeAnalystId, setActiveAnalystId] = useState<"jd" | "gabrie">("jd");
+  const [profileSelected, setProfileSelected] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [noticeClosing, setNoticeClosing] = useState(false);
 
   const [matchName, setMatchName] = useState("");
   const [opposition, setOpposition] = useState("");
@@ -452,8 +480,22 @@ export default function App() {
 
   const [activePanel, setActivePanel] = useState<Panel>("attack");
   const [panelSwitching, setPanelSwitching] = useState<PanelSwitching>("automatic");
-  const [analysisLevel, setAnalysisLevel] = useState<AnalysisLevel>("standard");
   const [playbackRate, setPlaybackRate] = useState(1);
+  const [keybinds, setKeybinds] = useState<Keybinds>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("ras-keybinds-jd") || "{}");
+      return { ...defaultKeybinds, ...saved };
+    } catch (_) {
+      return defaultKeybinds;
+    }
+  });
+  const [listeningKeybind, setListeningKeybind] = useState<KeybindAction | null>(null);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("keybinds");
+  const [appearance, setAppearance] = useState<AppearanceSettings>(() => { try { return { ...defaultAppearance, ...JSON.parse(localStorage.getItem("ras-appearance-jd") || "{}") }; } catch (_) { return defaultAppearance; } });
+  const [analystProfile, setAnalystProfile] = useState<AnalystProfile>(() => { try { return { ...defaultProfile, name: "JD Gouws", role: "Owner & Performance Analyst", ...JSON.parse(localStorage.getItem("ras-analyst-profile-jd") || "{}") }; } catch (_) { return { ...defaultProfile, name: "JD Gouws", role: "Owner & Performance Analyst" }; } });
+  const [lastSessionSaved, setLastSessionSaved] = useState("");
+  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [clipStage, setClipStage] = useState(0);
 
   const [attackActive, setAttackActive] = useState(false);
   const [attackStartZone, setAttackStartZone] = useState("");
@@ -543,6 +585,61 @@ export default function App() {
   }, [clipPaddingPresetId]);
 
   useEffect(() => {
+    localStorage.setItem(`ras-keybinds-${activeAnalystId}`, JSON.stringify(keybinds));
+  }, [keybinds, activeAnalystId]);
+
+  useEffect(() => {
+    localStorage.setItem(`ras-appearance-${activeAnalystId}`, JSON.stringify(appearance));
+    document.documentElement.style.setProperty("--green", appearance.accent);
+    document.documentElement.style.setProperty("--green2", appearance.accent2);
+    document.documentElement.style.setProperty("--hero-opacity", String(appearance.backdrop / 100));
+    document.documentElement.style.setProperty("--glass-opacity", String(appearance.glass / 100));
+    document.documentElement.dataset.motion = appearance.motion;
+    document.documentElement.dataset.density = appearance.density;
+  }, [appearance, activeAnalystId]);
+
+  useEffect(() => { localStorage.setItem(`ras-analyst-profile-${activeAnalystId}`, JSON.stringify(analystProfile)); }, [analystProfile, activeAnalystId]);
+
+  useEffect(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem("ras-last-session-jd") || "null");
+      if (saved) {
+        setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+        setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
+      }
+    } catch (_) {}
+  }, []);
+
+  useEffect(() => {
+    if (!matchName && !opposition && !events.length && !rawVideoName) return;
+    const timer = window.setTimeout(() => {
+      const savedAt = new Date().toISOString();
+      localStorage.setItem(`ras-last-session-${activeAnalystId}`, JSON.stringify({ matchName, opposition, competition, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, savedAt }));
+      setLastSessionSaved(savedAt);
+    }, 700);
+    return () => window.clearTimeout(timer);
+  }, [matchName, opposition, competition, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, activeAnalystId]);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onUpdateProgress) return;
+    return window.electronAPI.onUpdateProgress((progress) => setUpdateProgress(Math.round(progress.percent || 0)));
+  }, []);
+
+  useEffect(() => {
+    if (!isGeneratingCompilation) { setClipStage(0); return; }
+    const timer = window.setInterval(() => setClipStage((stage) => Math.min(3, stage + 1)), 2400);
+    return () => window.clearInterval(timer);
+  }, [isGeneratingCompilation]);
+
+  useEffect(() => {
+    if (!notice) return;
+    setNoticeClosing(false);
+    const closingTimer = window.setTimeout(() => setNoticeClosing(true), 4700);
+    const removeTimer = window.setTimeout(() => setNotice(null), 5100);
+    return () => { window.clearTimeout(closingTimer); window.clearTimeout(removeTimer); };
+  }, [notice]);
+
+  useEffect(() => {
     function isTypingTarget(target: EventTarget | null) {
       const element = target as HTMLElement | null;
       if (!element) return false;
@@ -551,9 +648,10 @@ export default function App() {
 
     function handleKeyDown(event: KeyboardEvent) {
       if (isTypingTarget(event.target) || editingEvent) return;
-      if (!videoRef.current) return;
+      const shortcut = shortcutFromEvent(event);
 
-      if (event.code === "Space") {
+      if (shortcut === keybinds.playPause) {
+        if (!videoRef.current) return;
         event.preventDefault();
         if (videoRef.current.paused) {
           void videoRef.current.play();
@@ -562,23 +660,88 @@ export default function App() {
         }
       }
 
-      if (event.key === "ArrowLeft") {
+      if (shortcut === keybinds.seekBack) {
+        if (!videoRef.current) return;
         event.preventDefault();
         seekVideo(-10);
       }
 
-      if (event.key === "ArrowRight") {
+      if (shortcut === keybinds.seekForward) {
+        if (!videoRef.current) return;
         event.preventDefault();
         seekVideo(10);
+      }
+
+      if (shortcut === keybinds.speedUp || shortcut === keybinds.speedDown) {
+        if (!videoRef.current) return;
+        event.preventDefault();
+        const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+        const currentIndex = Math.max(0, speeds.indexOf(playbackRate));
+        const nextIndex = shortcut === keybinds.speedUp ? Math.min(speeds.length - 1, currentIndex + 1) : Math.max(0, currentIndex - 1);
+        changePlaybackRate(speeds[nextIndex]);
+      }
+
+      if (shortcut === keybinds.undoEvent) {
+        event.preventDefault();
+        if (events.length) undoLastEvent();
+        return;
+      }
+
+      if (attackActive) {
+        if (shortcut === keybinds.gainlineWon) setPendingGainline("Won");
+        if (shortcut === keybinds.gainlineNeutral) setPendingGainline("Neutral");
+        if (shortcut === keybinds.gainlineLost) setPendingGainline("Lost");
+        if (shortcut === keybinds.ruckQuick) setPendingRuckSpeed("Quick");
+        if (shortcut === keybinds.ruckAverage) setPendingRuckSpeed("Average");
+        if (shortcut === keybinds.ruckSlow) setPendingRuckSpeed("Slow");
+        if (shortcut === keybinds.completePhase && attackAction === "phase" && pendingGainline && pendingRuckSpeed) completePhase();
+        if (shortcut === keybinds.undoPhase && phaseCount > 0) undoLastPhase();
+        if (shortcut === keybinds.finishAttack) setAttackAction("finish");
+        if (shortcut === keybinds.kick) setAttackAction("kick");
+        if (shortcut === keybinds.backToPhase) { setActiveKickType(null); setAttackAction("phase"); }
+        return;
+      }
+
+      if (shortcut === keybinds.attackPanel) switchPanel("attack");
+      if (shortcut === keybinds.defencePanel) switchPanel("defence");
+
+      if (activePanel === "defence") {
+        if (shortcut === keybinds.tackleMade) addDefenceEvent("Tackle Made");
+        if (shortcut === keybinds.tackleMissed) addDefenceEvent("Tackle Missed");
+        if (shortcut === keybinds.ballWon) addDefenceEvent("Ball Won", ballWonReason);
+        if (shortcut === keybinds.penaltyWon) addDefenceEvent("Penalty Won", penaltyWonReason);
+        if (shortcut === keybinds.penaltyConceded) addDefenceEvent("Penalty Conceded", penaltyConcededReason);
+        if (shortcut === keybinds.oppositionHeldUp) addDefenceEvent("Opposition Held Up");
+        if (shortcut === keybinds.tryConceded) addDefenceEvent("Try Conceded");
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [editingEvent]);
+  }, [editingEvent, keybinds, playbackRate, events.length, attackActive, attackAction, pendingGainline, pendingRuckSpeed, phaseCount, activePanel, ballWonReason, penaltyWonReason, penaltyConcededReason]);
 
   function notify(title: string, message: string, type: NoticeType = "info") {
+    setNoticeClosing(false);
     setNotice({ title, message, type });
+  }
+
+  function chooseAnalyst(id: "jd" | "gabrie") {
+    const base = analystProfiles.find((profile) => profile.id === id)!;
+    const read = <T,>(key: string, fallback: T): T => { try { return { ...fallback as object, ...JSON.parse(localStorage.getItem(key) || "{}") } as T; } catch (_) { return fallback; } };
+    setActiveAnalystId(id);
+    setKeybinds(read(`ras-keybinds-${id}`, defaultKeybinds));
+    setAppearance(read(`ras-appearance-${id}`, defaultAppearance));
+    setAnalystProfile(read(`ras-analyst-profile-${id}`, { ...defaultProfile, name: base.name, role: base.role }));
+    let saved: any = null;
+    try { saved = JSON.parse(localStorage.getItem(`ras-last-session-${id}`) || "null"); } catch (_) {}
+    setMatchName(saved?.matchName || ""); setOpposition(saved?.opposition || ""); setCompetition(saved?.competition || ""); setEvents(Array.isArray(saved?.events) ? saved.events : []);
+    setRawVideoName(saved?.rawVideoName || ""); setRawVideoPath(saved?.rawVideoPath || ""); setRawVideoUrl(saved?.rawVideoUrl || ""); setPlaybackVideoUrl(saved?.playbackVideoUrl || saved?.rawVideoUrl || ""); setLastSessionSaved(saved?.savedAt || "");
+    setGeneratedClips([]); setProfileSelected(true); setView("home");
+  }
+
+  function closeNotice() {
+    setNoticeClosing(true);
+    window.setTimeout(() => setNotice(null), 320);
   }
 
   function currentSeconds() {
@@ -921,7 +1084,6 @@ export default function App() {
       rawVideoPath,
       rawVideoUrl,
       playbackVideoUrl,
-      analysisLevel,
       panelSwitching,
       clipPaddingPresetId,
       selectedClipTypes,
@@ -956,7 +1118,6 @@ export default function App() {
         setRawVideoPath(data.rawVideoPath || "");
         setRawVideoUrl(data.rawVideoUrl || "");
         setPlaybackVideoUrl(data.playbackVideoUrl || data.rawVideoUrl || "");
-        setAnalysisLevel(data.analysisLevel || "standard");
         setPanelSwitching(data.panelSwitching || "automatic");
         setClipPaddingPresetId(data.clipPaddingPresetId || "coach");
         setSelectedClipTypes(Array.isArray(data.selectedClipTypes) ? data.selectedClipTypes : ["Gold Zone Entries"]);
@@ -1018,6 +1179,21 @@ export default function App() {
       { label: "Scrum Success", value: scrumValue, display: `${scrumValue.toFixed(1)}%`, target: "90%+", meets: scrumValue >= 90 || totalScrums === 0 },
       { label: "Exit Success", value: exitValue, display: `${exitValue.toFixed(1)}%`, target: "80%+", meets: exitValue >= 80 || exitKicks.length === 0 },
     ];
+
+    const performanceRankings = [
+      { label: "Attack Efficiency", display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%", score: attackEfficiencyValue - 45, enough: totalAttacks >= 3 },
+      { label: "Ball Security", display: `${ballLossRateValue.toFixed(1)}% ball loss rate`, target: "below 18%", score: 18 - ballLossRateValue, enough: totalAttacks >= 3 },
+      { label: "Gold Zone Conversion", display: `${goldZoneValue.toFixed(1)}% (${successfulGoldZoneEntries.length} from ${goldZoneEntries.length})`, target: "60%", score: goldZoneValue - 60, enough: goldZoneEntries.length >= 2 },
+      { label: "Gainline Performance", display: `${gainlineValue.toFixed(1)}%`, target: "65%", score: gainlineValue - 65, enough: allAttackPhases.length >= 5 },
+      { label: "Ruck Speed", display: `${quickBallValue.toFixed(1)}% quick ball`, target: "55%", score: quickBallValue - 55, enough: allAttackPhases.length >= 5 },
+      { label: "Tackle Completion", display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%", score: tackleCompletionValue - 88, enough: tackleMade + tackleMissed >= 5 },
+      { label: "Lineout Success", display: `${lineoutValue.toFixed(1)}%`, target: "85%", score: lineoutValue - 85, enough: totalLineouts >= 3 },
+      { label: "Scrum Success", display: `${scrumValue.toFixed(1)}%`, target: "90%", score: scrumValue - 90, enough: totalScrums >= 3 },
+      { label: "Exit Execution", display: `${exitValue.toFixed(1)}%`, target: "80%", score: exitValue - 80, enough: exitKicks.length >= 2 },
+    ].filter((metric) => metric.enough);
+
+    const matchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.score - a.score).slice(0, 3);
+    const matchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => a.score - b.score).slice(0, 3);
 
     const coachSummary: string[] = [];
     const knockOns = ballLostReasonBreakdown["Knock-on"] || 0;
@@ -1148,9 +1324,9 @@ export default function App() {
 
     y = 50;
     if (competition) addLine("Competition", competition);
+    if (analystProfile.name) addLine("Analyst", `${analystProfile.name}${analystProfile.role ? ` • ${analystProfile.role}` : ""}`);
     addLine("Events Logged", events.length);
     addLine("Match Footage", rawVideoName || "Not loaded");
-    addLine("Analysis Level", titleCase(analysisLevel));
 
     y += 3;
     const kpiY = y;
@@ -1159,6 +1335,14 @@ export default function App() {
     addKpiCard(margin + 92, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
     addKpiCard(margin + 138, "Exit", `${exitValue.toFixed(1)}%`, exitValue >= 80 || exitKicks.length === 0);
     y = kpiY + 24;
+
+    addSection("3 STRENGTHS");
+    if (matchStrengths.length) matchStrengths.forEach((metric, index) => addParagraph(`${index + 1}. ${metric.label}: ${metric.display} (target ${metric.target}).`));
+    else addParagraph("Not enough target-beating data was logged to identify a statistically reliable strength.");
+
+    addSection("3 WORK-ONS");
+    if (matchWorkOns.length) matchWorkOns.forEach((metric, index) => addParagraph(`${index + 1}. ${metric.label}: ${metric.display} (target ${metric.target}).`));
+    else addParagraph("No statistically reliable work-on was identified from the available match data.");
 
     addSection("ATTACK");
     addLine("Total Attacks", totalAttacks);
@@ -1534,6 +1718,8 @@ export default function App() {
           <p>{moduleTitle || "Professional Performance Platform"}</p>
         </div>
         <div className="topbar-actions">
+          <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
+          <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
           <span className="version-pill">v1.3.1</span>
         </div>
@@ -1544,13 +1730,14 @@ export default function App() {
   function NoticeToast() {
     if (!notice) return null;
     return (
-      <div className={`notice-toast ${notice.type}`}>
-        <button className="notice-close" onClick={() => setNotice(null)}>×</button>
-        <span>{notice.type === "success" ? "✓" : notice.type === "warning" ? "!" : notice.type === "error" ? "×" : "i"}</span>
+      <div className={`notice-toast ${notice.type}${noticeClosing ? " closing" : ""}`} role="status" aria-live="polite">
+        <button className="notice-close" onClick={closeNotice} aria-label="Dismiss notification">×</button>
+        <span className="notice-icon">{notice.type === "success" ? "✓" : notice.type === "warning" ? "!" : notice.type === "error" ? "×" : "i"}</span>
         <div>
           <strong>{notice.title}</strong>
           <p>{notice.message}</p>
         </div>
+        <div className="notice-progress" aria-hidden="true" />
       </div>
     );
   }
@@ -1564,9 +1751,10 @@ export default function App() {
         <Topbar />
         <section className="home-layout premium-home-layout">
           <div className="home-copy premium-home-copy">
-            <p className="home-kicker">Professional Performance Platform</p>
+            <p className="home-kicker">{analystProfile.name ? `Welcome back, ${analystProfile.name}` : "Professional Performance Platform"}</p>
             <h2 className="home-title">Rugby<br /><span>Analysis</span><br />Suite</h2>
             <p className="home-subtitle">Analyse matches, create coaching clips and prepare better rugby reviews from one professional platform.</p>
+            {(matchName || opposition || events.length) && <button className="continue-session-card" onClick={() => setView("analysis")}><span>Continue Analysis</span><strong>{matchTitle}</strong><small>{events.length} events tagged{lastSessionSaved ? ` • saved ${new Date(lastSessionSaved).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}</small><i>→</i></button>}
             <div className="home-badges">
               <span>Match Review</span>
               <span>Video Workflow</span>
@@ -1649,11 +1837,6 @@ export default function App() {
           <div className="analysis-right">
             <section className="panel controls-panel">
               <div className="control-toolbar">
-                <SelectField label="Analysis Level" value={analysisLevel} onChange={(value) => setAnalysisLevel(value as AnalysisLevel)}>
-                  <option value="basic">Basic</option>
-                  <option value="standard">Standard</option>
-                  <option value="detailed">Detailed</option>
-                </SelectField>
                 <SelectField label="Panel Switching" value={panelSwitching} onChange={(value) => setPanelSwitching(value as PanelSwitching)}>
                   <option value="automatic">Automatic</option>
                   <option value="manual">Manual</option>
@@ -1738,15 +1921,15 @@ export default function App() {
               <InlineZoneSelector label="Phase Zone" />
               <p className="phase-label">Gainline</p>
               <div className="phase-choice-grid gainline-choices">
-                {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}</button>)}
+                {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => { const action: KeybindAction = result === "Won" ? "gainlineWon" : result === "Neutral" ? "gainlineNeutral" : "gainlineLost"; return <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}<kbd>{keybinds[action]}</kbd></button>; })}
               </div>
               <p className="phase-label">Ruck Speed</p>
               <div className="phase-choice-grid ruck-choices">
-                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}</button>)}
+                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => { const action: KeybindAction = speed === "Quick" ? "ruckQuick" : speed === "Average" ? "ruckAverage" : "ruckSlow"; return <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}<kbd>{keybinds[action]}</kbd></button>; })}
               </div>
               <div className="phase-action-row">
-                <button className="secondary-btn" disabled={!phaseCount} onClick={undoLastPhase}>Undo Last Phase</button>
-                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase</button>
+                <button className="secondary-btn" disabled={!phaseCount} onClick={undoLastPhase}>Undo Last Phase <kbd>{keybinds.undoPhase}</kbd></button>
+                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase <kbd>{keybinds.completePhase}</kbd></button>
               </div>
             </div>}
 
@@ -1802,7 +1985,6 @@ export default function App() {
               </div>
               {activeRestart && <div className="restart-outcome-step"><button className="secondary-btn small back-step-btn" onClick={() => setActiveRestart(null)}>← Back</button><div className="button-grid two"><button onClick={() => addRestart("Possession Gained")}>Possession Gained</button><button className="negative" onClick={() => addRestart("Possession Lost")}>Possession Lost</button></div></div>}
             </div>
-            {analysisLevel !== "basic" && (
               <div className="maul-box">
                 <p className="eyebrow">Maul</p>
                 {maulActive ? (
@@ -1826,7 +2008,6 @@ export default function App() {
                   </div>
                 )}
               </div>
-            )}
           </>
         )}
       </div>
@@ -1861,20 +2042,20 @@ export default function App() {
         </div>
         <InlineZoneSelector label="Action Zone" />
         <div className="button-grid two">
-          <button onClick={() => addDefenceEvent("Tackle Made")}>Tackle Made</button>
-          <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed</button>
+          <button onClick={() => addDefenceEvent("Tackle Made")}>Tackle Made <kbd>{keybinds.tackleMade}</kbd></button>
+          <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed <kbd>{keybinds.tackleMissed}</kbd></button>
           <button onClick={() => addDefenceEvent("Opponent Lineout Stolen")}>Opponent Lineout Stolen</button>
           <button onClick={() => addDefenceEvent("Opponent Scrum Stolen")}>Opponent Scrum Stolen</button>
-          <button onClick={() => addDefenceEvent("Opposition Held Up")}>Opposition Held Up</button>
-          <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded</button>
+          <button onClick={() => addDefenceEvent("Opposition Held Up")}>Opposition Held Up <kbd>{keybinds.oppositionHeldUp}</kbd></button>
+          <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded <kbd>{keybinds.tryConceded}</kbd></button>
         </div>
         <div className="reason-grid">
           <label>Ball Won Reason<select value={ballWonReason} onChange={(event) => setBallWonReason(event.target.value)}>{ballWonReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-          <button onClick={() => addDefenceEvent("Ball Won", ballWonReason)}>Ball Won</button>
+          <button onClick={() => addDefenceEvent("Ball Won", ballWonReason)}>Ball Won <kbd>{keybinds.ballWon}</kbd></button>
           <label>Penalty Won Reason<select value={penaltyWonReason} onChange={(event) => setPenaltyWonReason(event.target.value)}>{penaltyReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-          <button onClick={() => addDefenceEvent("Penalty Won", penaltyWonReason)}>Penalty Won</button>
+          <button onClick={() => addDefenceEvent("Penalty Won", penaltyWonReason)}>Penalty Won <kbd>{keybinds.penaltyWon}</kbd></button>
           <label>Penalty Conceded Reason<select value={penaltyConcededReason} onChange={(event) => setPenaltyConcededReason(event.target.value)}>{penaltyConcededReasons.map((reason) => <option key={reason}>{reason}</option>)}</select></label>
-          <button className="negative" onClick={() => addDefenceEvent("Penalty Conceded", penaltyConcededReason)}>Penalty Conceded</button>
+          <button className="negative" onClick={() => addDefenceEvent("Penalty Conceded", penaltyConcededReason)}>Penalty Conceded <kbd>{keybinds.penaltyConceded}</kbd></button>
         </div>
       </div>
     );
@@ -2076,6 +2257,74 @@ export default function App() {
     );
   }
 
+  function SettingsPage() {
+    const groups: { title: string; description: string; items: { action: KeybindAction; label: string }[] }[] = [
+      { title: "Video Playback", description: "Controls available whenever match footage is loaded.", items: [
+        { action: "playPause", label: "Play / Pause" }, { action: "seekBack", label: "Back 10 seconds" }, { action: "seekForward", label: "Forward 10 seconds" }, { action: "speedUp", label: "Faster playback" }, { action: "speedDown", label: "Slower playback" }, { action: "undoEvent", label: "Undo last event" },
+      ] },
+      { title: "Attack Phase", description: "Repeated actions used while an attack is active.", items: [
+        { action: "gainlineWon", label: "Gainline won" }, { action: "gainlineNeutral", label: "Gainline neutral" }, { action: "gainlineLost", label: "Gainline lost" }, { action: "ruckQuick", label: "Quick ruck" }, { action: "ruckAverage", label: "Average ruck" }, { action: "ruckSlow", label: "Slow ruck" }, { action: "completePhase", label: "Complete phase" }, { action: "undoPhase", label: "Undo phase" }, { action: "finishAttack", label: "Finish attack menu" }, { action: "kick", label: "Kick menu" }, { action: "backToPhase", label: "Back to phase" },
+      ] },
+      { title: "Defence", description: "Context-sensitive actions used while the Defence panel is open.", items: [
+        { action: "tackleMade", label: "Tackle made" }, { action: "tackleMissed", label: "Tackle missed" }, { action: "ballWon", label: "Ball won" }, { action: "penaltyWon", label: "Penalty won" }, { action: "penaltyConceded", label: "Penalty conceded" }, { action: "oppositionHeldUp", label: "Opposition held up" }, { action: "tryConceded", label: "Try conceded" },
+      ] },
+      { title: "Navigation", description: "Switch quickly between the main logging panels.", items: [
+        { action: "attackPanel", label: "Open Attack panel" }, { action: "defencePanel", label: "Open Defence panel" },
+      ] },
+    ];
+
+    function updateKeybind(action: KeybindAction, event: React.KeyboardEvent<HTMLInputElement>) {
+      event.preventDefault();
+      event.stopPropagation();
+      const shortcut = shortcutFromEvent(event);
+      if (["Control", "Alt", "Shift", "Meta"].includes(event.key)) return;
+      setKeybinds((current) => ({ ...current, [action]: shortcut }));
+      setListeningKeybind(null);
+    }
+
+    return (
+      <main className="ras-shell settings-shell">
+        <div className="grid-bg" />
+        <div className="settings-aurora" aria-hidden="true" />
+        <Topbar moduleTitle="Settings" />
+        <section className="settings-layout">
+          <div className="settings-intro">
+            <div><p className="home-kicker">Analyst Control Deck</p><h2>Make the workflow <span>yours.</span></h2><p>Click a shortcut field, then press the key or key combination you want. Changes save automatically on this device.</p><div className="settings-status"><i /><span>{listeningKeybind ? "Listening for your next key…" : "All controls ready"}</span></div></div>
+            <div className="settings-actions"><button className="home-btn" onClick={() => setView("home")}>← Home</button><button className="secondary-btn" onClick={() => setKeybinds(defaultKeybinds)}>Reset Defaults</button></div>
+          </div>
+          <div className="settings-tabs">
+            <button className={settingsTab === "keybinds" ? "active" : ""} onClick={() => setSettingsTab("keybinds")}>Keybinds</button>
+            <button className={settingsTab === "appearance" ? "active" : ""} onClick={() => setSettingsTab("appearance")}>Appearance</button>
+            <button className={settingsTab === "profile" ? "active" : ""} onClick={() => setSettingsTab("profile")}>Analyst Profile</button>
+          </div>
+          {settingsTab === "keybinds" && <div className="settings-groups">
+            {groups.map((group) => {
+              const duplicateKeys = group.items.map((item) => keybinds[item.action]).filter((key, index, keys) => keys.indexOf(key) !== index);
+              return <section className="panel keybind-group" key={group.title}><div><p className="eyebrow">{group.title}</p><h3>{group.description}</h3></div><div className="keybind-list">{group.items.map((item) => {
+                const conflict = duplicateKeys.includes(keybinds[item.action]);
+                const listening = listeningKeybind === item.action;
+                return <label className={`keybind-row${conflict ? " conflict" : ""}${listening ? " listening" : ""}`} key={item.action}><span>{item.label}{conflict && <small>Shortcut conflict</small>}{listening && <small className="listening-copy">Listening for input…</small>}</span><div className="keybind-capture"><i aria-hidden="true" /><input readOnly value={listening ? "Press a key…" : keybinds[item.action]} onKeyDown={(event) => updateKeybind(item.action, event)} onFocus={(event) => { setListeningKeybind(item.action); event.currentTarget.select(); }} onBlur={() => setListeningKeybind((current) => current === item.action ? null : current)} aria-label={`Shortcut for ${item.label}`} /></div></label>;
+              })}</div></section>;
+            })}
+          </div>}
+          {settingsTab === "appearance" && <div className="settings-groups appearance-groups">
+            <section className="panel keybind-group"><div><p className="eyebrow">Accent Colour</p><h3>Choose the energy of your workspace.</h3></div><div className="accent-presets">{[
+              ["RAS Green", "#7ed957", "#5cb338"], ["Electric Blue", "#60a5fa", "#2563eb"], ["Performance Gold", "#f5d76e", "#c99720"], ["Elite Purple", "#a78bfa", "#7c3aed"], ["Match Red", "#fb7185", "#dc2626"],
+            ].map(([label, accent, accent2]) => <button key={label} className={appearance.accent === accent ? "active" : ""} onClick={() => setAppearance((current) => ({ ...current, accent, accent2 }))}><i style={{ background: accent }} /><span>{label}</span></button>)}</div></section>
+            <section className="panel keybind-group"><div><p className="eyebrow">Motion</p><h3>Control how alive the interface feels.</h3></div><div className="segmented-settings">{(["off", "subtle", "full"] as const).map((motion) => <button key={motion} className={appearance.motion === motion ? "active" : ""} onClick={() => setAppearance((current) => ({ ...current, motion }))}>{titleCase(motion)}</button>)}</div></section>
+            <section className="panel keybind-group"><div><p className="eyebrow">Interface Density</p><h3>Compact for speed, comfortable for clarity.</h3></div><div className="segmented-settings">{(["compact", "comfortable"] as const).map((density) => <button key={density} className={appearance.density === density ? "active" : ""} onClick={() => setAppearance((current) => ({ ...current, density }))}>{titleCase(density)}</button>)}</div></section>
+            <section className="panel keybind-group range-settings"><label><span>Background intensity <strong>{appearance.backdrop}%</strong></span><input type="range" min="35" max="100" value={appearance.backdrop} onChange={(event) => setAppearance((current) => ({ ...current, backdrop: Number(event.target.value) }))} /></label><label><span>Glass strength <strong>{appearance.glass}%</strong></span><input type="range" min="45" max="100" value={appearance.glass} onChange={(event) => setAppearance((current) => ({ ...current, glass: Number(event.target.value) }))} /></label></section>
+          </div>}
+          {settingsTab === "profile" && <div className="profile-settings-grid">
+            <section className="panel analyst-brand-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="eyebrow">Official Brand</p><h3>Rugby Analysis Suite</h3><p>The company name and logo stay consistent across every analyst and client delivery.</p></section>
+            <section className="panel analyst-profile-form"><p className="eyebrow">Your Details • {activeAnalystId === "jd" ? "Owner" : "Analyst"}</p><h3>Personalise your analyst identity.</h3><label>Analyst name<input readOnly value={analystProfile.name} /></label><label>Role<input value={analystProfile.role} onChange={(event) => setAnalystProfile((current) => ({ ...current, role: event.target.value }))} placeholder="Performance Analyst" /></label><label>Email<input value={analystProfile.email} onChange={(event) => setAnalystProfile((current) => ({ ...current, email: event.target.value }))} placeholder="you@email.com" /></label><label>Phone<input value={analystProfile.phone} onChange={(event) => setAnalystProfile((current) => ({ ...current, phone: event.target.value }))} placeholder="Optional" /></label></section>
+          </div>}
+        </section>
+        <NoticeToast />
+      </main>
+    );
+  }
+
   function SupportPage() {
     return (
       <main className="ras-shell support-shell">
@@ -2099,9 +2348,31 @@ export default function App() {
     );
   }
 
-  if (view === "analysis") return AnalysisPage();
-  if (view === "compilations") return CompilationVideosPage();
-  if (view === "support") return SupportPage();
-  if (view === "plays") return PlaysPage();
-  return Home();
+  function ActivityOverlay() {
+    const clipStages = ["Preparing coaching package", "Building title cards", "Rendering compilation videos", "Finalising exported files"];
+    const activity = updateProgress !== null && updateProgress < 100
+      ? { eyebrow: "App Update", title: "Downloading the latest build", detail: `${updateProgress}% complete`, progress: updateProgress }
+      : isGeneratingCompilation
+        ? { eyebrow: "Clip Engine", title: clipStages[clipStage], detail: `${generatedClips.length} compilation groups in the render queue`, progress: null }
+        : isGenerating
+          ? { eyebrow: "Clip Engine", title: "Generating test clip", detail: "Preparing a short quality-check export", progress: null }
+          : isOptimisingVideo
+            ? { eyebrow: "Video Engine", title: "Optimising match footage", detail: "Creating a smooth playback copy without changing the original", progress: null }
+            : null;
+    if (!activity) return null;
+    return <div className="activity-backdrop" role="status" aria-live="polite"><div className="activity-card"><div className="activity-rings"><i /><i /><img src={logoSrc} alt="" /></div><p className="eyebrow">{activity.eyebrow}</p><h2>{activity.title}</h2><p>{activity.detail}</p>{activity.progress !== null ? <div className="activity-progress"><span style={{ width: `${activity.progress}%` }} /></div> : <div className="activity-loader"><span /><span /><span /></div>}{isGeneratingCompilation && <div className="activity-steps">{clipStages.map((stage, index) => <span className={index < clipStage ? "done" : index === clipStage ? "active" : ""} key={stage}>{index < clipStage ? "✓" : index === clipStage ? "●" : "○"} {stage}</span>)}</div>}</div></div>;
+  }
+
+  function AnalystGate() {
+    if (profileSelected) return null;
+    return <div className="analyst-gate"><div className="analyst-gate-bg" /><section className="analyst-gate-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="home-kicker">Internal Analyst Workspace</p><h1>Who’s analysing today?</h1><p>Select your profile to load your personal keybinds, appearance, details and recent session.</p><div className="analyst-profile-options">{analystProfiles.map((profile) => <button key={profile.id} onClick={() => chooseAnalyst(profile.id)}><span>{profile.name.split(" ").map((part) => part[0]).join("")}</span><div><strong>{profile.name}</strong><small>{profile.owner ? "Owner & Performance Analyst" : "Performance Analyst"}</small></div><i>→</i></button>)}</div><small className="ras-locked-brand">Rugby Analysis Suite branding remains locked across all profiles.</small></section></div>;
+  }
+
+  const page = view === "analysis" ? AnalysisPage()
+    : view === "compilations" ? CompilationVideosPage()
+      : view === "settings" ? SettingsPage()
+        : view === "support" ? SupportPage()
+          : view === "plays" ? PlaysPage()
+            : Home();
+  return <>{page}<ActivityOverlay /><AnalystGate /></>;
 }

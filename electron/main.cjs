@@ -97,6 +97,12 @@ function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
 
+  autoUpdater.on("download-progress", (progress) => {
+    if (!mainWindow) return;
+    mainWindow.setProgressBar(Math.max(0, Math.min(1, progress.percent / 100)));
+    mainWindow.webContents.send("update-progress", { percent: progress.percent, transferred: progress.transferred, total: progress.total });
+  });
+
   autoUpdater.on("update-available", async (info) => {
     const result = await dialog.showMessageBox(mainWindow, {
       type: "info",
@@ -112,6 +118,10 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on("update-downloaded", async () => {
+    if (mainWindow) {
+      mainWindow.setProgressBar(-1);
+      mainWindow.webContents.send("update-progress", { percent: 100 });
+    }
     const result = await dialog.showMessageBox(mainWindow, {
       type: "info",
       title: "Update Ready",
@@ -125,7 +135,10 @@ function setupAutoUpdater() {
     if (result.response === 0) autoUpdater.quitAndInstall();
   });
 
-  autoUpdater.on("error", (error) => console.error("Auto updater error:", error));
+  autoUpdater.on("error", (error) => {
+    if (mainWindow) mainWindow.setProgressBar(-1);
+    console.error("Auto updater error:", error);
+  });
 
   setTimeout(() => {
     autoUpdater.checkForUpdates().catch((error) => console.error("Update check failed:", error));
