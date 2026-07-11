@@ -50,6 +50,16 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.2": [
+      "Added separate JD Gouws and Gabrie Gouws analyst profiles.",
+      "Keybinds, appearance, contact details and sessions now save per analyst.",
+      "Added fully customisable keyboard shortcuts and conflict warnings.",
+      "Added statistical 3 Strengths and 3 Work-ons to coach reports.",
+      "Added appearance controls for colour, motion, density and visual intensity.",
+      "Added automatic session recovery and a Welcome Back experience.",
+      "Added animated notifications, compilation rendering stages and update progress.",
+      "Removed analysis levels in favour of one complete analyst workflow.",
+    ],
     "1.3.1": [
       "Gainline tracking added to every attacking phase.",
       "Quick, average and slow ruck-speed tracking added.",
