@@ -479,6 +479,8 @@ export default function App() {
   const [matchName, setMatchName] = useState("");
   const [opposition, setOpposition] = useState("");
   const [competition, setCompetition] = useState("");
+  const [teamScore, setTeamScore] = useState("");
+  const [oppositionScore, setOppositionScore] = useState("");
   const [events, setEvents] = useState<EventLog[]>([]);
   const [selectedZone, setSelectedZone] = useState("Midfield");
 
@@ -509,6 +511,7 @@ export default function App() {
   const [phasePerformance, setPhasePerformance] = useState<PhasePerformance[]>([]);
   const [pendingGainline, setPendingGainline] = useState<GainlineResult | null>(null);
   const [pendingRuckSpeed, setPendingRuckSpeed] = useState<RuckSpeed | null>(null);
+  const [phaseZoneConfirmed, setPhaseZoneConfirmed] = useState(false);
   const [activeKickType, setActiveKickType] = useState<KickType | null>(null);
   const [activeRestart, setActiveRestart] = useState<string | null>(null);
   const [possessionInGoldZone, setPossessionInGoldZone] = useState(false);
@@ -532,6 +535,7 @@ export default function App() {
   const [selectedClipTypes, setSelectedClipTypes] = useState<string[]>(["Gold Zone Entries"]);
   const [clipPaddingPresetId, setClipPaddingPresetId] = useState<ClipPaddingPresetId>("coach");
   const [generatedClips, setGeneratedClips] = useState<ClipGroup[]>([]);
+  const [compilationOutputs, setCompilationOutputs] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isGeneratingCompilation, setIsGeneratingCompilation] = useState(false);
   const [statusMessage, setStatusMessage] = useState("Ready.");
@@ -539,7 +543,7 @@ export default function App() {
   const [showExportCheck, setShowExportCheck] = useState(false);
   const [showShortcutGuide, setShowShortcutGuide] = useState(false);
   const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
-  const [appVersion, setAppVersion] = useState("1.3.5");
+  const [appVersion, setAppVersion] = useState("1.3.6");
   const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
 
   const attacks = events.filter((event) => event.category === "attack");
@@ -614,7 +618,7 @@ export default function App() {
     try {
       const saved = JSON.parse(localStorage.getItem("ras-last-session-jd") || "null");
       if (saved) {
-        setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+        setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
         setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
       }
     } catch (_) {}
@@ -624,11 +628,11 @@ export default function App() {
     if (!matchName && !opposition && !events.length && !rawVideoName) return;
     const timer = window.setTimeout(() => {
       const savedAt = new Date().toISOString();
-      localStorage.setItem(`ras-last-session-${activeAnalystId}`, JSON.stringify({ matchName, opposition, competition, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, savedAt }));
+      localStorage.setItem(`ras-last-session-${activeAnalystId}`, JSON.stringify({ matchName, opposition, competition, teamScore, oppositionScore, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, savedAt }));
       setLastSessionSaved(savedAt);
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [matchName, opposition, competition, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, activeAnalystId]);
+  }, [matchName, opposition, competition, teamScore, oppositionScore, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, activeAnalystId]);
 
   useEffect(() => {
     if (!window.electronAPI?.onUpdateProgress) return;
@@ -756,7 +760,7 @@ export default function App() {
     setAnalystProfile(read(`ras-analyst-profile-${id}`, { ...defaultProfile, name: base.name, role: base.role }));
     let saved: any = null;
     try { saved = JSON.parse(localStorage.getItem(`ras-last-session-${id}`) || "null"); } catch (_) {}
-    setMatchName(""); setOpposition(""); setCompetition(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
+    setMatchName(""); setOpposition(""); setCompetition(""); setTeamScore(""); setOppositionScore(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
     setRecoveryCandidate(saved ? { id, saved } : null);
     setGeneratedClips([]); setProfileSelected(true); setView("home");
   }
@@ -764,7 +768,7 @@ export default function App() {
   function restoreRecoveredSession() {
     const saved = recoveryCandidate?.saved;
     if (!saved) return;
-    setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+    setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
     setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
     setRecoveryCandidate(null); setView("analysis"); notify("Session Restored", `${saved.events?.length || 0} tagged events recovered.`, "success");
   }
@@ -871,6 +875,9 @@ export default function App() {
 
   function addSetPiece(eventName: string) {
     addEvent({ category: "set-piece", event: eventName });
+    if (eventName === "Lineout Lost" || eventName === "Scrum Lost" || eventName === "Opposition Lineout Won" || eventName === "Opposition Scrum Won") {
+      autoSwitchPanel("defence", `${eventName} was tagged. Possession is with the opposition.`);
+    }
   }
 
   function addKick(outcome: string, kickType: KickType) {
@@ -895,6 +902,7 @@ export default function App() {
 
   function selectZone(zone: string) {
     setSelectedZone(zone);
+    if (attackActive && attackAction === "phase") setPhaseZoneConfirmed(true);
     if (attackActive && zone === "Opp 22" && !possessionInGoldZone) {
       setPossessionInGoldZone(true);
       setActiveGoldZoneEntry(true);
@@ -910,6 +918,7 @@ export default function App() {
     setPhasePerformance([]);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setPhaseZoneConfirmed(false);
     setActiveKickType(null);
     const isNewGoldZoneEntry = selectedZone === "Opp 22" && !possessionInGoldZone;
     setActiveGoldZoneEntry(isNewGoldZoneEntry);
@@ -917,11 +926,12 @@ export default function App() {
   }
 
   function completePhase() {
-    if (!pendingGainline || !pendingRuckSpeed) return;
+    if (!pendingGainline || !pendingRuckSpeed || !phaseZoneConfirmed) return;
     setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed: pendingRuckSpeed, zone: selectedZone }]);
     setPhaseCount((prev) => prev + 1);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
+    setPhaseZoneConfirmed(false);
   }
 
   function finishAttack(outcome: string, reason?: string, kickType?: KickType) {
@@ -965,7 +975,7 @@ export default function App() {
 
   function addDefenceEvent(eventName: string, reason?: string) {
     addEvent({ category: "defence", event: eventName, outcome: eventName, reason });
-    if (eventName === "Ball Won" || eventName === "Penalty Won" || eventName === "Opposition Held Up") {
+    if (eventName === "Ball Won" || eventName === "Penalty Won" || eventName === "Opposition Held Up" || eventName === "Opponent Lineout Stolen" || eventName === "Opponent Scrum Stolen") {
       setPossessionInGoldZone(false);
       autoSwitchPanel("attack", `${eventName} was tagged.`);
     }
@@ -1074,6 +1084,8 @@ export default function App() {
     setMatchName("");
     setOpposition("");
     setCompetition("");
+    setTeamScore("");
+    setOppositionScore("");
     setEvents([]);
     setSelectedZone("Midfield");
     setActivePanel("attack");
@@ -1109,10 +1121,12 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.3.5",
+      version: "1.3.6",
       matchName,
       opposition,
       competition,
+      teamScore,
+      oppositionScore,
       events,
       selectedZone,
       rawVideoName,
@@ -1144,6 +1158,8 @@ export default function App() {
         setMatchName(data.matchName || "");
         setOpposition(data.opposition || "");
         setCompetition(data.competition || "");
+        setTeamScore(data.teamScore ?? "");
+        setOppositionScore(data.oppositionScore ?? "");
         setEvents(Array.isArray(data.events) ? data.events : []);
         setSelectedZone(data.selectedZone || "Midfield");
         setMaulActive(false);
@@ -1190,6 +1206,11 @@ export default function App() {
     const margin = 16;
     let y = 18;
     const title = matchTitle === "No Match Loaded" ? "Match Analysis" : matchTitle;
+    const videoReviewLinks = compilationOutputs.map((outputPath) => {
+      const fileName = outputPath.split(/[\\/]/).pop() || outputPath;
+      const label = fileName.replace(/-compilation\.mp4$/i, "").replace(/-/g, " ");
+      return { label: titleCase(label), fileName, url: encodeURI(`file:///${outputPath.replace(/\\/g, "/")}`) };
+    });
 
     const normaliseReason = (reason?: string) => {
       if (!reason) return "Not specified";
@@ -1241,6 +1262,10 @@ export default function App() {
 
     const matchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.score - a.score).slice(0, 3);
     const matchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => a.score - b.score).slice(0, 3);
+    const hasRecordedScore = teamScore !== "" && oppositionScore !== "";
+    const teamScoreValue = Number(teamScore);
+    const oppositionScoreValue = Number(oppositionScore);
+    const resultType = !hasRecordedScore ? "unrecorded" : teamScoreValue > oppositionScoreValue ? "win" : teamScoreValue < oppositionScoreValue ? "loss" : "draw";
 
     const coachSummary: string[] = [];
     const knockOns = ballLostReasonBreakdown["Knock-on"] || 0;
@@ -1281,7 +1306,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.5", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.6", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1348,6 +1373,56 @@ export default function App() {
       doc.text(value, x + 3, y + 16);
     }
 
+    function addInsightCard(index: number, heading: string, detail: string, tone: "risk" | "positive") {
+      const cardHeight = 22;
+      ensureSpace(cardHeight + 4);
+      const isRisk = tone === "risk";
+      doc.setFillColor(isRisk ? 255 : 241, isRisk ? 247 : 253, isRisk ? 237 : 244);
+      doc.setDrawColor(isRisk ? 239 : 126, isRisk ? 68 : 217, isRisk ? 68 : 87);
+      doc.roundedRect(margin, y - 5, pageWidth - margin * 2, cardHeight, 3, 3, "FD");
+      doc.setFillColor(isRisk ? 239 : 126, isRisk ? 68 : 217, isRisk ? 68 : 87);
+      doc.circle(margin + 8, y + 5, 4.5, "F");
+      doc.setTextColor(isRisk ? 255 : 2, isRisk ? 255 : 7, isRisk ? 255 : 13);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.text(String(index), margin + 8, y + 6.2, { align: "center" });
+      doc.setTextColor(15, 23, 42);
+      doc.setFontSize(10.5);
+      doc.text(heading, margin + 16, y + 2);
+      doc.setTextColor(71, 85, 105);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.5);
+      const detailLines = doc.splitTextToSize(detail, pageWidth - margin * 2 - 23);
+      doc.text(detailLines.slice(0, 2), margin + 16, y + 7);
+      y += cardHeight + 4;
+    }
+
+    function addVideoButton(label: string, fileName: string, url: string) {
+      ensureSpace(18);
+      doc.setFillColor(6, 17, 10);
+      doc.setDrawColor(126, 217, 87);
+      doc.roundedRect(margin, y - 5, pageWidth - margin * 2, 14, 3, 3, "FD");
+      doc.setFillColor(126, 217, 87);
+      doc.circle(margin + 8, y + 2, 3.2, "F");
+      doc.setTextColor(2, 7, 13);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8);
+      doc.text(">", margin + 7, y + 3.2);
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(10);
+      doc.text(`WATCH ${label.toUpperCase()}`, margin + 15, y + 1);
+      doc.setTextColor(148, 163, 184);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(7.5);
+      doc.text(fileName, margin + 15, y + 5.2);
+      doc.setTextColor(126, 217, 87);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.text("OPEN MP4  →", pageWidth - margin - 5, y + 2, { align: "right" });
+      doc.link(margin, y - 5, pageWidth - margin * 2, 14, { url });
+      y += 18;
+    }
+
     // Header
     doc.setFillColor(2, 7, 13);
     doc.rect(0, 0, pageWidth, 38, "F");
@@ -1364,31 +1439,54 @@ export default function App() {
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
     doc.setFontSize(18);
-    doc.text("RUGBY STAT REPORT", margin + 28, 15);
+    doc.text("RUGBY PERFORMANCE REPORT", margin + 28, 15);
     doc.setFontSize(10.5);
     doc.setFont("helvetica", "normal");
     doc.text(title, margin + 28, 25);
 
-    y = 50;
-    if (competition) addLine("Competition", competition);
-    addLine("Events Logged", events.length);
-    addLine("Match Footage", rawVideoName || "Not loaded");
+    y = 48;
+    doc.setTextColor(100, 116, 139);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(8);
+    doc.text(`${competition || "MATCH REVIEW"}  /  ${events.length} EVENTS LOGGED  /  ${rawVideoName || "NO FOOTAGE LINKED"}`.toUpperCase(), margin, y);
+    y += 8;
 
-    y += 3;
+    addSection("EXECUTIVE PERFORMANCE SUMMARY");
+    coachSummary.slice(0, 2).forEach((suggestion) => addParagraph(suggestion));
+
+    addSection("KEY STATISTICAL RISKS - REVIEW FIRST");
+    if (matchWorkOns.length) {
+      matchWorkOns.forEach((metric, index) => addInsightCard(index + 1, metric.label, `${metric.display}. Reference benchmark: ${metric.target}. This was one of the largest measured gaps in the available match data.`, "risk"));
+    } else {
+      addInsightCard(1, "No statistically reliable red flag", "The available sample did not expose a target miss. Confirm the picture through video review before closing the analysis.", "positive");
+    }
+
+    addSection("PERFORMANCE STRENGTHS");
+    if (matchStrengths.length) {
+      matchStrengths.forEach((metric, index) => addInsightCard(index + 1, metric.label, `${metric.display}. Benchmark: ${metric.target}.`, "positive"));
+    } else {
+      addParagraph("Not enough target-beating data was logged to identify a statistically reliable strength.");
+    }
+
+    addSection("MATCH SNAPSHOT");
+    ensureSpace(28);
     const kpiY = y;
     addKpiCard(margin, "Attack Eff.", `${attackEfficiencyValue.toFixed(1)}%`, attackEfficiencyValue >= 45 || totalAttacks === 0);
-    addKpiCard(margin + 46, "Gold Zone", `${goldZoneValue.toFixed(1)}%`, goldZoneValue >= 60 || goldZoneEntries.length === 0);
-    addKpiCard(margin + 92, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
-    addKpiCard(margin + 138, "Exit", `${exitValue.toFixed(1)}%`, exitValue >= 80 || exitKicks.length === 0);
+    addKpiCard(margin + 46, "Gainline", `${gainlineValue.toFixed(1)}%`, gainlineValue >= 65 || allAttackPhases.length === 0);
+    addKpiCard(margin + 92, "Quick Ball", `${quickBallValue.toFixed(1)}%`, quickBallValue >= 55 || allAttackPhases.length === 0);
+    addKpiCard(margin + 138, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
     y = kpiY + 24;
 
-    addSection("3 STRENGTHS");
-    if (matchStrengths.length) matchStrengths.forEach((metric, index) => addParagraph(`${index + 1}. ${metric.label}: ${metric.display} (target ${metric.target}).`));
-    else addParagraph("Not enough target-beating data was logged to identify a statistically reliable strength.");
+    addSection("VIDEO REVIEW LIBRARY");
+    if (videoReviewLinks.length) {
+      addParagraph("Open the priority compilations below to validate the statistical picture against match footage.");
+      videoReviewLinks.forEach((video) => addVideoButton(video.label, video.fileName, video.url));
+    } else {
+      addParagraph("No videos are linked yet. Generate the required compilations and export this report again to add clickable review buttons.");
+    }
 
-    addSection("3 WORK-ONS");
-    if (matchWorkOns.length) matchWorkOns.forEach((metric, index) => addParagraph(`${index + 1}. ${metric.label}: ${metric.display} (target ${metric.target}).`));
-    else addParagraph("No statistically reliable work-on was identified from the available match data.");
+    addSection("DETAILED PERFORMANCE EVIDENCE");
+    addParagraph("The following sections provide the supporting detail behind the verdict, red flags and priority review clips above.");
 
     addSection("ATTACK");
     addLine("Total Attacks", totalAttacks);
@@ -1456,7 +1554,27 @@ export default function App() {
     addSection("COACH SUMMARY");
     coachSummary.forEach((suggestion) => addParagraph(`• ${suggestion}`));
 
+    addSection("STATISTICAL MATCH EVALUATION");
+    if (hasRecordedScore) {
+      addParagraph(`${matchName || "The team"} ${resultType === "win" ? "won" : resultType === "loss" ? "lost" : "drew"} ${teamScoreValue}-${oppositionScoreValue}. The indicators below describe the strongest statistical associations with that result. They should be interpreted alongside coaching context and video evidence rather than as standalone proof of cause.`);
+    } else {
+      addParagraph("A final score was not entered, so the report cannot label the match as a win or loss. The statistical drivers below still summarise the clearest positive and negative influences on performance.");
+    }
+    addParagraph(`Strongest statistical indicators: ${matchStrengths.length ? matchStrengths.map((metric) => `${metric.label} (${metric.display})`).join("; ") : "no statistically reliable target-beating indicator was established"}.`);
+    addParagraph(`Primary development indicators: ${matchWorkOns.length ? matchWorkOns.map((metric) => `${metric.label} (${metric.display}, reference ${metric.target})`).join("; ") : "no statistically reliable benchmark gap was established"}.`);
+    if (resultType === "win" && matchStrengths.length) addParagraph(`The leading positive indicators - particularly ${matchStrengths.slice(0, 2).map((metric) => metric.label).join(" and ")} - showed the strongest positive association with the result. Video review should confirm the tactical and technical behaviours behind those numbers.`);
+    if (resultType === "loss" && matchWorkOns.length) addParagraph(`The largest measured gaps - particularly ${matchWorkOns.slice(0, 2).map((metric) => metric.label).join(" and ")} - were the indicators most strongly associated with the result. They are recommended priorities for contextual video review and future training design.`);
+    if (resultType === "draw") addParagraph("The data suggests neither the positive indicators nor the identified gaps created a decisive enough advantage. Review the priority clips for the moments where control could have been converted into scoreboard separation.");
+
     addFooter();
+    const totalPages = doc.getNumberOfPages();
+    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+      doc.setPage(pageNumber);
+      doc.setTextColor(100, 116, 139);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(7.5);
+      doc.text(`PAGE ${pageNumber} OF ${totalPages}`, pageWidth / 2, pageHeight - 8, { align: "center" });
+    }
     doc.save(`${safeFileName(title)}-stat-report.pdf`);
     notify("Stat Report Exported", `${events.length} events exported into the PDF report.`, "success");
   }
@@ -1624,6 +1742,7 @@ export default function App() {
     try {
       const result = await window.electronAPI.generateCompilations({ videoPath: rawVideoPath, groups: orderedGroups });
       if (result.success) {
+        setCompilationOutputs(result.outputs || []);
         setStatusMessage(`${result.outputs?.length || 0} compilation videos generated.`);
         notify("Compilation Videos Created", `${result.outputs?.length || 0} MP4 files exported successfully.`, "success");
       } else {
@@ -1768,7 +1887,7 @@ export default function App() {
           <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
           <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.5</span>
+          <span className="version-pill">v1.3.6</span>
         </div>
       </header>
     );
@@ -1862,6 +1981,11 @@ export default function App() {
           <input placeholder="Your Team" value={matchName} onChange={(event) => setMatchName(event.target.value)} />
           <input placeholder="Opposition" value={opposition} onChange={(event) => setOpposition(event.target.value)} />
           <input placeholder="Competition" value={competition} onChange={(event) => setCompetition(event.target.value)} />
+          <div className="score-setup">
+            <input aria-label="Your team score" type="number" min="0" placeholder="Your score" value={teamScore} onChange={(event) => setTeamScore(event.target.value)} />
+            <span>-</span>
+            <input aria-label="Opposition score" type="number" min="0" placeholder="Opp score" value={oppositionScore} onChange={(event) => setOppositionScore(event.target.value)} />
+          </div>
         </section>
 
         <section className="analysis-workspace">
@@ -1912,14 +2036,15 @@ export default function App() {
               {activePanel === "attack" ? <AttackControls /> : <DefenceControls />}
             </section>
 
-            <section className="panel event-log-panel compact-log live-log">
-              <div className="panel-head log-head">
-                <div><p className="eyebrow">Event Log</p><h2>{events.length} Tagged Events</h2></div>
-                <button className="secondary-btn small undo-btn" onClick={undoLastEvent} disabled={!events.length}>↶ Undo Last Event</button>
-              </div>
-              {events.length === 0 ? <div className="empty-state">Load match footage and start tagging events.</div> : <EventLogList />}
-            </section>
           </div>
+        </section>
+
+        <section className="panel event-log-panel compact-log live-log analysis-event-log">
+          <div className="panel-head log-head">
+            <div><p className="eyebrow">Event Log</p><h2>{events.length} Tagged Events</h2></div>
+            <button className="secondary-btn small undo-btn" onClick={undoLastEvent} disabled={!events.length}>↶ Undo Last Event</button>
+          </div>
+          {events.length === 0 ? <div className="empty-state">Load match footage and start tagging events.</div> : <EventLogList />}
         </section>
         {editingEvent && <EditEventModal />}
         <NoticeToast />
@@ -1963,9 +2088,9 @@ export default function App() {
             {attackAction === "phase" && <div className="phase-performance-card">
               <div className="phase-performance-head">
                 <div><p className="eyebrow">Phase {phaseCount + 1}</p><h3>Gainline &amp; Ruck Speed</h3></div>
-                <span>{pendingGainline && pendingRuckSpeed ? `${selectedZone} • Ready` : selectedZone}</span>
+                <span className={phaseZoneConfirmed ? "zone-confirmed" : "zone-unconfirmed"}>{phaseZoneConfirmed ? `${selectedZone} • Confirmed` : "Confirm field position"}</span>
               </div>
-              <InlineZoneSelector label="Phase Zone" />
+              <InlineZoneSelector label="Confirm Phase Zone" />
               <p className="phase-label">Gainline</p>
               <div className="phase-choice-grid gainline-choices">
                 {(["Won", "Neutral", "Lost"] as GainlineResult[]).map((result) => { const action: KeybindAction = result === "Won" ? "gainlineWon" : result === "Neutral" ? "gainlineNeutral" : "gainlineLost"; return <button key={result} className={`${result.toLowerCase()} ${pendingGainline === result ? "selected" : ""}`} onClick={() => setPendingGainline(result)}>{result}<kbd>{keybinds[action]}</kbd></button>; })}
@@ -1976,7 +2101,7 @@ export default function App() {
               </div>
               <div className="phase-action-row">
                 <button className="secondary-btn" disabled={!phaseCount} onClick={undoLastPhase}>Undo Last Phase <kbd>{keybinds.undoPhase}</kbd></button>
-                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed} onClick={completePhase}>Complete Phase <kbd>{keybinds.completePhase}</kbd></button>
+                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed || !phaseZoneConfirmed} onClick={completePhase}>{phaseZoneConfirmed ? "Complete Phase" : "Confirm Zone First"} <kbd>{keybinds.completePhase}</kbd></button>
               </div>
             </div>}
 
@@ -2087,6 +2212,8 @@ export default function App() {
           <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed <kbd>{keybinds.tackleMissed}</kbd></button>
           <button onClick={() => addDefenceEvent("Opponent Lineout Stolen")}>Opponent Lineout Stolen</button>
           <button onClick={() => addDefenceEvent("Opponent Scrum Stolen")}>Opponent Scrum Stolen</button>
+          <button className="negative-soft" onClick={() => addSetPiece("Opposition Lineout Won")}>Opposition Lineout Won</button>
+          <button className="negative-soft" onClick={() => addSetPiece("Opposition Scrum Won")}>Opposition Scrum Won</button>
           <button onClick={() => addDefenceEvent("Opposition Held Up")}>Opposition Held Up <kbd>{keybinds.oppositionHeldUp}</kbd></button>
           <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded <kbd>{keybinds.tryConceded}</kbd></button>
         </div>

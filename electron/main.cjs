@@ -51,6 +51,14 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.6": [
+      "Redesigned the Rugby Performance Report with evidence-led priorities and a Statistical Match Evaluation.",
+      "Added clickable compilation-video links to exported reports.",
+      "Added final-score tracking and result-based statistical summaries.",
+      "Added automatic possession-based Attack and Defence panel switching for set pieces.",
+      "Added a required field-position checkpoint for every attacking phase.",
+      "Fixed the Match Analysis dashboard layout and independent scrolling.",
+    ],
     "1.3.5": [
       "Restored the official Rugby Analysis Suite desktop and installer icon.",
       "Removed the redundant standalone kicking menu; kicks remain inside the attack workflow and statistics.",
