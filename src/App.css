@@ -218,6 +218,189 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .analysis-shell .match-setup { grid-template-columns: 1fr 1fr .85fr .72fr; }
 .score-setup { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 8px; }
 .score-setup span { color: var(--muted); font-weight: 950; }
+.team-logo-input { grid-column: 1 / -1; display:flex; align-items:center; gap:12px; min-height:68px; padding:10px 14px; border:1px dashed rgba(126,217,87,.3); border-radius:16px; background:rgba(126,217,87,.05); cursor:pointer; }
+.team-logo-input>span,.team-logo-input>img { width:46px; height:46px; display:grid; place-items:center; object-fit:contain; border-radius:12px; background:rgba(255,255,255,.07); color:var(--green); font-size:24px; }
+.team-logo-input div { display:grid; gap:3px; flex:1; }.team-logo-input small{color:var(--muted)}.team-logo-input button{padding:8px 12px;border-radius:10px;background:rgba(239,68,68,.12);color:#fecaca;border:1px solid rgba(239,68,68,.25)}
+.match-insights-grid{position:relative;z-index:2;width:min(1520px,calc(100vw - 64px));margin:22px auto 0;display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.match-insights-grid .panel{padding:18px}.possession-timeline-card{grid-column:1/-1}.possession-bar{height:14px;display:flex;overflow:hidden;border-radius:999px;background:#111827}.possession-bar i{background:linear-gradient(90deg,var(--green2),var(--green))}.possession-bar b{background:linear-gradient(90deg,#334155,#64748b)}.possession-times{display:flex;justify-content:space-between;margin-top:10px;color:var(--muted);font-size:12px;font-weight:850}.territory-heatmap{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}.territory-heatmap div{min-height:70px;display:grid;place-content:center;text-align:center;border-radius:12px;background:rgba(126,217,87,calc(.06 + var(--heat) * .42));border:1px solid rgba(126,217,87,calc(.12 + var(--heat) * .4))}.territory-heatmap strong{font-size:20px}.territory-heatmap span{font-size:8px;color:#dbe7df;text-transform:uppercase;font-weight:900}.momentum-card svg{width:100%;height:96px;overflow:visible}.momentum-card svg line{stroke:rgba(255,255,255,.15);stroke-width:.5}.momentum-card svg path{fill:none;stroke:var(--green);stroke-width:2;vector-effect:non-scaling-stroke;filter:drop-shadow(0 0 5px rgba(126,217,87,.4))}.possession-timeline{position:relative;height:58px;border-radius:14px;overflow:hidden;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.08)}.possession-timeline button{position:absolute;top:0;height:100%;min-width:3px;border:0;border-right:1px solid rgba(0,0,0,.3);border-radius:0;overflow:hidden;text-indent:-999px}.possession-timeline button.attack{background:linear-gradient(180deg,var(--green),var(--green2))}.possession-timeline button.defence{background:linear-gradient(180deg,#64748b,#334155)}.timeline-legend{display:flex;gap:18px;margin-top:10px;color:var(--muted);font-size:11px}.timeline-legend span{display:flex;align-items:center;gap:6px}.timeline-legend i{width:9px;height:9px;border-radius:50%}.timeline-legend i.attack{background:var(--green)}.timeline-legend i.defence{background:#64748b}.mini-empty{min-height:70px;display:grid;place-items:center;color:var(--muted)}.completion-list .passed span{background:rgba(126,217,87,.18)!important;color:var(--green)!important}.completion-list .pending span{background:rgba(245,215,110,.16)!important;color:var(--amber)!important}
+@media(max-width:1100px){.match-insights-grid{grid-template-columns:1fr;width:100%}.possession-timeline-card{grid-column:auto}.analysis-shell .match-setup{grid-template-columns:1fr 1fr}.team-logo-input{grid-column:1/-1}}
+
+/* Match insight cards: present territory as a rugby pitch, not a generic chart. */
+.match-insights-grid {
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+}
+.possession-card,
+.momentum-card {
+  grid-column: span 4;
+}
+.territory-heat-card,
+.possession-timeline-card {
+  grid-column: span 8;
+}
+.territory-heat-card {
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 78% 18%, rgba(126,217,87,.10), transparent 34%),
+    rgba(2,18,14,.92);
+}
+.heatmap-direction {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  margin: 6px 2px 8px;
+  color: rgba(219,231,223,.48);
+  font-size: 8px;
+  font-weight: 950;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+.heatmap-direction b {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--green);
+  font-size: 9px;
+}
+.heatmap-direction b i {
+  font-size: 17px;
+  font-style: normal;
+  line-height: 1;
+}
+.heatmap-direction span:last-child { text-align: right; }
+.rugby-territory-map {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1.05fr 1.45fr .85fr 1.45fr 1.05fr;
+  min-height: 142px;
+  overflow: hidden;
+  border: 2px solid rgba(235,255,239,.30);
+  border-radius: 17px;
+  background:
+    repeating-linear-gradient(0deg, rgba(255,255,255,.018) 0 9px, transparent 9px 18px),
+    linear-gradient(90deg, #09251b, #0d3423 48%, #0d3423 52%, #09251b);
+  box-shadow: inset 0 0 34px rgba(0,0,0,.45), 0 14px 34px rgba(0,0,0,.18);
+  isolation: isolate;
+}
+.rugby-territory-map::before {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 2px;
+  background: rgba(255,255,255,.64);
+  box-shadow: -22vw 0 rgba(255,255,255,.26), 22vw 0 rgba(255,255,255,.26);
+  pointer-events: none;
+}
+.rugby-territory-map::after {
+  content: "";
+  position: absolute;
+  z-index: 3;
+  inset: 10px;
+  border: 1px solid rgba(255,255,255,.14);
+  border-radius: 10px;
+  pointer-events: none;
+}
+.territory-zone {
+  --heat: 0;
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  padding: 18px 6px;
+  border-right: 1px solid rgba(255,255,255,.12);
+  background:
+    radial-gradient(circle at 50% 55%, rgba(125,255,91,calc(.08 + var(--heat) * .58)), transparent 66%),
+    rgba(126,217,87,calc(var(--heat) * .15));
+  text-align: center;
+  transition: transform .22s ease, filter .22s ease, background .22s ease;
+}
+.territory-zone:last-child { border-right: 0; }
+.territory-zone:hover {
+  z-index: 4;
+  filter: brightness(1.18);
+}
+.territory-zone span {
+  max-width: 86px;
+  color: rgba(239,255,242,.76);
+  font-size: 9px;
+  font-weight: 950;
+  letter-spacing: .08em;
+  line-height: 1.15;
+  text-transform: uppercase;
+}
+.territory-zone strong {
+  margin: 4px 0 1px;
+  color: #fff;
+  font-size: clamp(22px, 2.1vw, 31px);
+  line-height: 1;
+  text-shadow: 0 2px 12px rgba(0,0,0,.55);
+}
+.territory-zone small {
+  color: rgba(239,255,242,.64);
+  font-size: 8px;
+  font-weight: 850;
+}
+.territory-zone.hot::before {
+  content: "HOT ZONE";
+  position: absolute;
+  top: 8px;
+  padding: 3px 6px;
+  border: 1px solid rgba(177,255,143,.42);
+  border-radius: 999px;
+  background: rgba(1,19,12,.62);
+  color: #b6ff92;
+  font-size: 7px;
+  font-weight: 950;
+  letter-spacing: .08em;
+}
+.territory-zone.hot { box-shadow: inset 0 -4px 0 var(--green); }
+.heatmap-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 11px;
+  padding: 10px 12px;
+  border: 1px solid rgba(126,217,87,.14);
+  border-radius: 13px;
+  background: rgba(126,217,87,.055);
+}
+.heatmap-summary p { display: grid; gap: 2px; margin: 0; }
+.heatmap-summary strong { color: #edf8ef; font-size: 11px; }
+.heatmap-summary small { color: var(--muted); font-size: 9px; }
+.heatmap-pulse {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 0 0 rgba(126,217,87,.5);
+  animation: heatmapPulse 2s ease-out infinite;
+}
+@keyframes heatmapPulse {
+  70% { box-shadow: 0 0 0 8px rgba(126,217,87,0); }
+  100% { box-shadow: 0 0 0 0 rgba(126,217,87,0); }
+}
+@media(max-width:1100px) {
+  .match-insights-grid { grid-template-columns: 1fr; width: 100%; }
+  .possession-card,
+  .momentum-card,
+  .territory-heat-card,
+  .possession-timeline-card { grid-column: 1 / -1; }
+}
+@media(max-width:620px) {
+  .rugby-territory-map { min-height: 118px; }
+  .territory-zone { padding: 16px 3px; }
+  .territory-zone span { font-size: 7px; }
+  .territory-zone small { display: none; }
+  .territory-zone.hot::before { content: "HOT"; }
+  .heatmap-direction b { font-size: 0; }
+  .heatmap-direction b i { font-size: 17px; }
+}
 .match-setup input, .support-form input, .support-form textarea { width: 100%; border: 1px solid rgba(255,255,255,0.12); border-radius: 15px; background: rgba(0,0,0,0.34); padding: 15px 16px; color: #fff; outline: none; }
 .match-setup input:focus, .support-form input:focus, .support-form textarea:focus { border-color: var(--green); }
 .analysis-grid { position: relative; z-index: 2; width: min(1220px, calc(100vw - 104px)); margin: 0 auto; display: grid; grid-template-columns: 1fr 340px; gap: 20px; }

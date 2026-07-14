@@ -25,6 +25,7 @@ declare global {
         videoPath: string;
         groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
+      exportCoachPackage: (data: { pdfBase64: string; html: string; videoPaths: string[]; suggestedName: string }) => Promise<{ success: boolean; folder?: string; message?: string }>;
       onUpdateProgress?: (callback: (progress: { percent: number; transferred?: number; total?: number }) => void) => () => void;
       onCompilationProgress?: (callback: (progress: { group?: string; clip?: number; groupClips?: number; completed: number; total: number; percent: number; done?: boolean }) => void) => () => void;
       checkForUpdates?: () => Promise<{ success: boolean; message?: string }>;
@@ -349,6 +350,64 @@ function eventTone(event: EventLog) {
   return "neutral";
 }
 
+type RgbColour = [number, number, number];
+
+function mixColour(colour: RgbColour, target: RgbColour, targetWeight: number): RgbColour {
+  return colour.map((channel, index) => Math.round(channel * (1 - targetWeight) + target[index] * targetWeight)) as RgbColour;
+}
+
+function colourDistance(first: RgbColour, second: RgbColour) {
+  return Math.sqrt(first.reduce((total, channel, index) => total + Math.pow(channel - second[index], 2), 0));
+}
+
+async function paletteFromLogo(dataUrl: string): Promise<{ accent: RgbColour; secondary: RgbColour; dark: RgbColour; panel: RgbColour; scoreText: RgbColour }> {
+  const fallback: RgbColour = [126, 217, 87];
+  if (!dataUrl) return { accent: fallback, secondary: [196, 205, 201], dark: [18, 32, 23], panel: [29, 49, 34], scoreText: [0, 0, 0] };
+  try {
+    const image = new Image();
+    image.src = dataUrl;
+    await image.decode();
+    const canvas = document.createElement("canvas");
+    canvas.width = 72;
+    canvas.height = 72;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("Canvas unavailable");
+    context.clearRect(0, 0, 72, 72);
+    context.drawImage(image, 0, 0, 72, 72);
+    const pixels = context.getImageData(0, 0, 72, 72).data;
+    const buckets = new Map<string, { colour: RgbColour; count: number; saturation: number; lightness: number }>();
+    for (let index = 0; index < pixels.length; index += 16) {
+      if (pixels[index + 3] < 100) continue;
+      const colour: RgbColour = [pixels[index], pixels[index + 1], pixels[index + 2]];
+      const max = Math.max(...colour);
+      const min = Math.min(...colour);
+      const lightness = (max + min) / 2;
+      if (lightness < 18 || lightness > 244) continue;
+      const saturation = max === min ? 0 : (max - min) / (255 - Math.abs(2 * lightness - 255));
+      const quantised = colour.map((channel) => Math.min(255, Math.round(channel / 32) * 32)) as RgbColour;
+      const key = quantised.join("-");
+      const existing = buckets.get(key);
+      if (existing) existing.count += 1;
+      else buckets.set(key, { colour: quantised, count: 1, saturation, lightness });
+    }
+    const ranked = [...buckets.values()].sort((first, second) => {
+      const firstScore = first.count * (.35 + first.saturation * 2.2) * (.7 + Math.min(first.lightness, 255 - first.lightness) / 128);
+      const secondScore = second.count * (.35 + second.saturation * 2.2) * (.7 + Math.min(second.lightness, 255 - second.lightness) / 128);
+      return secondScore - firstScore;
+    });
+    let accent = ranked[0]?.colour || fallback;
+    const accentBrightness = accent[0] * .299 + accent[1] * .587 + accent[2] * .114;
+    if (accentBrightness < 72) accent = mixColour(accent, [255, 255, 255], .34);
+    const secondary = ranked.find((candidate) => colourDistance(candidate.colour, accent) > 105)?.colour || mixColour(accent, [255, 255, 255], .5);
+    const dark = mixColour(accent, [0, 0, 0], .76);
+    const panel = mixColour(accent, [0, 0, 0], .66);
+    const scoreBrightness = accent[0] * .299 + accent[1] * .587 + accent[2] * .114;
+    return { accent, secondary, dark, panel, scoreText: scoreBrightness > 145 ? [0, 0, 0] : [255, 255, 255] };
+  } catch (_) {
+    return { accent: fallback, secondary: [196, 205, 201], dark: [18, 32, 23], panel: [29, 49, 34], scoreText: [0, 0, 0] };
+  }
+}
+
 const VideoPlayer = memo(function VideoPlayer({
   videoRef,
   rawVideoPath,
@@ -481,6 +540,7 @@ export default function App() {
   const [competition, setCompetition] = useState("");
   const [teamScore, setTeamScore] = useState("");
   const [oppositionScore, setOppositionScore] = useState("");
+  const [teamLogoDataUrl, setTeamLogoDataUrl] = useState("");
   const [events, setEvents] = useState<EventLog[]>([]);
   const [selectedZone, setSelectedZone] = useState("Midfield");
 
@@ -541,9 +601,11 @@ export default function App() {
   const [statusMessage, setStatusMessage] = useState("Ready.");
   const [editingEvent, setEditingEvent] = useState<EditableEvent | null>(null);
   const [showExportCheck, setShowExportCheck] = useState(false);
+  const [pendingCoachPackage, setPendingCoachPackage] = useState(false);
+  const [showMatchCheck, setShowMatchCheck] = useState(false);
   const [showShortcutGuide, setShowShortcutGuide] = useState(false);
   const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
-  const [appVersion, setAppVersion] = useState("1.3.6");
+  const [appVersion, setAppVersion] = useState("1.3.7");
   const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
 
   const attacks = events.filter((event) => event.category === "attack");
@@ -594,6 +656,46 @@ export default function App() {
     return "No Match Loaded";
   }, [matchName, opposition]);
 
+  const matchInsights = useMemo(() => {
+    const ordered = [...events].sort((a, b) => a.seconds - b.seconds);
+    const modeFor = (event: EventLog): Panel => {
+      if (event.category === "defence") return "defence";
+      if (["Lineout Lost", "Scrum Lost", "Opposition Lineout Won", "Opposition Scrum Won"].includes(event.event)) return "defence";
+      if (event.category === "restart" && event.outcome === "Possession Lost") return "defence";
+      return "attack";
+    };
+    const segments: { mode: Panel; start: number; end: number; zone: string; label: string }[] = [];
+    ordered.forEach((event, index) => {
+      const next = ordered[index + 1];
+      const end = next ? next.seconds : event.seconds;
+      const mode = modeFor(event);
+      const previous = segments[segments.length - 1];
+      if (previous && previous.mode === mode && previous.zone === event.zone && Math.abs(previous.end - event.seconds) < 1) previous.end = end;
+      else segments.push({ mode, start: event.seconds, end, zone: event.zone, label: clipLabel(event) });
+    });
+    const attackSeconds = segments.filter((segment) => segment.mode === "attack").reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0);
+    const defenceSeconds = segments.filter((segment) => segment.mode === "defence").reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0);
+    const heat = pitchZones.map((zone) => ({ zone, count: events.filter((event) => event.zone === zone || event.endZone === zone).length }));
+    let momentum = 0;
+    const points = ordered.map((event) => {
+      const tone = eventTone(event);
+      momentum += tone === "positive" ? 1 : tone === "negative" ? -1 : 0;
+      return { seconds: event.seconds, value: momentum, label: clipLabel(event) };
+    });
+    return { ordered, segments, attackSeconds, defenceSeconds, heat, points };
+  }, [events]);
+
+  const completionChecks = [
+    { label: "Team and opposition entered", passed: Boolean(matchName && opposition) },
+    { label: "Final score entered", passed: teamScore !== "" && oppositionScore !== "" },
+    { label: "Competition entered", passed: Boolean(competition) },
+    { label: "Team logo added for the report", passed: Boolean(teamLogoDataUrl) },
+    { label: "Match footage linked", passed: Boolean(rawVideoPath) },
+    { label: "Events logged", passed: events.length > 0 },
+    { label: "Every attack has completed phase data", passed: !attacks.some((event) => !event.phases) },
+    { label: "Compilation videos generated", passed: compilationOutputs.length > 0 },
+  ];
+
   const selectedClipPadding = useMemo(() => {
     return clipPaddingPresets.find((preset) => preset.id === clipPaddingPresetId) || clipPaddingPresets[1];
   }, [clipPaddingPresetId]);
@@ -618,7 +720,7 @@ export default function App() {
     try {
       const saved = JSON.parse(localStorage.getItem("ras-last-session-jd") || "null");
       if (saved) {
-        setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+        setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setTeamLogoDataUrl(saved.teamLogoDataUrl || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
         setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
       }
     } catch (_) {}
@@ -628,11 +730,11 @@ export default function App() {
     if (!matchName && !opposition && !events.length && !rawVideoName) return;
     const timer = window.setTimeout(() => {
       const savedAt = new Date().toISOString();
-      localStorage.setItem(`ras-last-session-${activeAnalystId}`, JSON.stringify({ matchName, opposition, competition, teamScore, oppositionScore, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, savedAt }));
+      localStorage.setItem(`ras-last-session-${activeAnalystId}`, JSON.stringify({ matchName, opposition, competition, teamScore, oppositionScore, teamLogoDataUrl, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, savedAt }));
       setLastSessionSaved(savedAt);
     }, 700);
     return () => window.clearTimeout(timer);
-  }, [matchName, opposition, competition, teamScore, oppositionScore, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, activeAnalystId]);
+  }, [matchName, opposition, competition, teamScore, oppositionScore, teamLogoDataUrl, events, rawVideoName, rawVideoPath, rawVideoUrl, playbackVideoUrl, activeAnalystId]);
 
   useEffect(() => {
     if (!window.electronAPI?.onUpdateProgress) return;
@@ -760,7 +862,7 @@ export default function App() {
     setAnalystProfile(read(`ras-analyst-profile-${id}`, { ...defaultProfile, name: base.name, role: base.role }));
     let saved: any = null;
     try { saved = JSON.parse(localStorage.getItem(`ras-last-session-${id}`) || "null"); } catch (_) {}
-    setMatchName(""); setOpposition(""); setCompetition(""); setTeamScore(""); setOppositionScore(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
+    setMatchName(""); setOpposition(""); setCompetition(""); setTeamScore(""); setOppositionScore(""); setTeamLogoDataUrl(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
     setRecoveryCandidate(saved ? { id, saved } : null);
     setGeneratedClips([]); setProfileSelected(true); setView("home");
   }
@@ -768,7 +870,7 @@ export default function App() {
   function restoreRecoveredSession() {
     const saved = recoveryCandidate?.saved;
     if (!saved) return;
-    setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
+    setMatchName(saved.matchName || ""); setOpposition(saved.opposition || ""); setCompetition(saved.competition || ""); setTeamScore(saved.teamScore ?? ""); setOppositionScore(saved.oppositionScore ?? ""); setTeamLogoDataUrl(saved.teamLogoDataUrl || ""); setEvents(Array.isArray(saved.events) ? saved.events : []);
     setRawVideoName(saved.rawVideoName || ""); setRawVideoPath(saved.rawVideoPath || ""); setRawVideoUrl(saved.rawVideoUrl || ""); setPlaybackVideoUrl(saved.playbackVideoUrl || saved.rawVideoUrl || ""); setLastSessionSaved(saved.savedAt || "");
     setRecoveryCandidate(null); setView("analysis"); notify("Session Restored", `${saved.events?.length || 0} tagged events recovered.`, "success");
   }
@@ -1086,6 +1188,7 @@ export default function App() {
     setCompetition("");
     setTeamScore("");
     setOppositionScore("");
+    setTeamLogoDataUrl("");
     setEvents([]);
     setSelectedZone("Midfield");
     setActivePanel("attack");
@@ -1119,14 +1222,23 @@ export default function App() {
     notify("Match Cleared", "The match, events and loaded footage were cleared.", "info");
   }
 
+  function loadTeamLogo(file?: File) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { notify("Invalid Logo", "Choose a PNG, JPG or WEBP image.", "warning"); return; }
+    const reader = new FileReader();
+    reader.onload = () => setTeamLogoDataUrl(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  }
+
   function saveProject() {
     const project = {
-      version: "1.3.6",
+      version: "1.3.7",
       matchName,
       opposition,
       competition,
       teamScore,
       oppositionScore,
+      teamLogoDataUrl,
       events,
       selectedZone,
       rawVideoName,
@@ -1160,6 +1272,7 @@ export default function App() {
         setCompetition(data.competition || "");
         setTeamScore(data.teamScore ?? "");
         setOppositionScore(data.oppositionScore ?? "");
+        setTeamLogoDataUrl(data.teamLogoDataUrl || "");
         setEvents(Array.isArray(data.events) ? data.events : []);
         setSelectedZone(data.selectedZone || "Midfield");
         setMaulActive(false);
@@ -1190,16 +1303,18 @@ export default function App() {
     allAttackPhases.length < 5 && attacks.length ? "Too few classified phases for reliable gainline and ruck-speed insights." : "",
   ].filter(Boolean);
 
-  function exportPDFReport(confirmed = false) {
+  async function exportPDFReport(confirmed = false, coachPackage = false) {
     if (!events.length) {
       notify("No Events", "Tag events before exporting a stat report.", "warning");
       return;
     }
     if (!confirmed && exportWarnings.length) {
+      setPendingCoachPackage(coachPackage);
       setShowExportCheck(true);
       return;
     }
 
+    const coverPalette = await paletteFromLogo(teamLogoDataUrl);
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
@@ -1209,7 +1324,8 @@ export default function App() {
     const videoReviewLinks = compilationOutputs.map((outputPath) => {
       const fileName = outputPath.split(/[\\/]/).pop() || outputPath;
       const label = fileName.replace(/-compilation\.mp4$/i, "").replace(/-/g, " ");
-      return { label: titleCase(label), fileName, url: encodeURI(`file:///${outputPath.replace(/\\/g, "/")}`) };
+      const url = coachPackage ? `Video%20Clips/${encodeURIComponent(fileName)}` : encodeURI(`file:///${outputPath.replace(/\\/g, "/")}`);
+      return { label: titleCase(label), fileName, url };
     });
 
     const normaliseReason = (reason?: string) => {
@@ -1225,6 +1341,39 @@ export default function App() {
         summary[reason] = (summary[reason] || 0) + 1;
         return summary;
       }, {});
+
+    const possessionSeconds = matchInsights.attackSeconds + matchInsights.defenceSeconds;
+    const possessionValue = Number(percent(matchInsights.attackSeconds, possessionSeconds));
+    const oppositionPossessionValue = Math.max(0, 100 - possessionValue);
+    const territorySeconds = matchInsights.segments.reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0);
+    const attackingTerritorySeconds = matchInsights.segments
+      .filter((segment) => segment.zone === "Opp Half" || segment.zone === "Opp 22")
+      .reduce((total, segment) => total + Math.max(0, segment.end - segment.start), 0);
+    const territoryValue = Number(percent(attackingTerritorySeconds, territorySeconds));
+    const ownTerritoryValue = Math.max(0, 100 - territoryValue);
+    const penaltyConcededEvents = events.filter((event) =>
+      event.event === "Penalty Conceded"
+      || event.outcome === "Penalty Conceded"
+      || (event.outcome === "Ball Lost" && event.reason === "Penalty Conceded"),
+    );
+    const penaltyWonEvents = events.filter((event) => event.event === "Penalty Won" || event.outcome === "Penalty Won");
+    const zoneEvidence = pitchZones.map((zone) => {
+      const zoneEvents = events.filter((event) => event.zone === zone);
+      return {
+        zone,
+        total: zoneEvents.length,
+        attacks: zoneEvents.filter((event) => event.category === "attack").length,
+        ballLosses: zoneEvents.filter((event) => event.outcome === "Ball Lost").length,
+        penaltiesConceded: penaltyConcededEvents.filter((event) => event.zone === zone).length,
+        penaltiesWon: penaltyWonEvents.filter((event) => event.zone === zone).length,
+      };
+    });
+    const penaltyByReason = penaltyConcededEvents.reduce<Record<string, number>>((summary, event) => {
+      const reason = normaliseReason(event.reason);
+      summary[reason] = (summary[reason] || 0) + 1;
+      return summary;
+    }, {});
+    const penaltyHotspot = [...zoneEvidence].sort((a, b) => b.penaltiesConceded - a.penaltiesConceded)[0];
 
     const attackEfficiencyValue = Number(percent(successfulAttacks, totalAttacks));
     const ballLossRateValue = Number(percent(ballLosses, totalAttacks));
@@ -1260,12 +1409,28 @@ export default function App() {
       { label: "Exit Execution", display: `${exitValue.toFixed(1)}%`, target: "80%", score: exitValue - 80, enough: exitKicks.length >= 2 },
     ].filter((metric) => metric.enough);
 
-    const matchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.score - a.score).slice(0, 3);
-    const matchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => a.score - b.score).slice(0, 3);
+    const allMatchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.score - a.score);
+    const allMatchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => a.score - b.score);
+    const possibleCauses: Record<string, string> = {
+      "Attack Efficiency": "attack shape clarity, decision-making at the defensive line, phase continuity and the quality of possession starts",
+      "Ball Security": "handling under pressure, carrier isolation, breakdown support and forced passes",
+      "Gold Zone Conversion": "patience, role clarity, option quality and decision-making close to the try line",
+      "Gainline Performance": "carrier momentum, receiving depth, footwork before contact and support-line timing",
+      "Ruck Speed": "ball presentation, first-arriver urgency, cleanout accuracy and carrier support",
+      "Tackle Completion": "defensive connection, spacing, tackle technique and fatigue-related decision-making",
+      "Lineout Success": "throw accuracy, timing, movement disguise and pressure on the lifting unit",
+      "Scrum Success": "engagement accuracy, collective shape, pressure management and exit decisions",
+      "Exit Execution": "kick selection, chase connection, field awareness and pressure before the kick",
+    };
     const hasRecordedScore = teamScore !== "" && oppositionScore !== "";
     const teamScoreValue = Number(teamScore);
     const oppositionScoreValue = Number(oppositionScore);
     const resultType = !hasRecordedScore ? "unrecorded" : teamScoreValue > oppositionScoreValue ? "win" : teamScoreValue < oppositionScoreValue ? "loss" : "draw";
+    // Lead with the evidence that best explains the recorded result, without hiding
+    // the strongest counter-signals. A win receives the full positive picture; a
+    // loss receives the full development picture.
+    const matchStrengths = resultType === "loss" ? allMatchStrengths.slice(0, 3) : allMatchStrengths;
+    const matchWorkOns = resultType === "win" ? allMatchWorkOns.slice(0, 3) : allMatchWorkOns;
 
     const coachSummary: string[] = [];
     const knockOns = ballLostReasonBreakdown["Knock-on"] || 0;
@@ -1306,7 +1471,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.6", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.7", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1343,6 +1508,46 @@ export default function App() {
       doc.setTextColor(51, 65, 85);
       doc.text(lines, margin + 2, y);
       y += lines.length * 5 + 4;
+    }
+
+    function addShareBar(label: string, primaryLabel: string, primaryValue: number, secondaryLabel: string, secondaryValue: number) {
+      ensureSpace(22);
+      const width = pageWidth - margin * 2;
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9.5);
+      doc.setTextColor(15, 23, 42);
+      doc.text(label, margin, y);
+      doc.setFontSize(8);
+      doc.setTextColor(71, 85, 105);
+      doc.text(`${primaryLabel} ${primaryValue.toFixed(1)}%`, margin, y + 5);
+      doc.text(`${secondaryLabel} ${secondaryValue.toFixed(1)}%`, pageWidth - margin, y + 5, { align: "right" });
+      doc.setFillColor(226, 232, 240);
+      doc.roundedRect(margin, y + 8, width, 5, 2.5, 2.5, "F");
+      if (primaryValue > 0) {
+        doc.setFillColor(92, 179, 56);
+        doc.roundedRect(margin, y + 8, Math.max(2, width * Math.min(100, primaryValue) / 100), 5, 2.5, 2.5, "F");
+      }
+      y += 19;
+    }
+
+    function addEventRow(event: EventLog) {
+      const eventName = event.category === "attack" ? `${event.attackType || "Attack"} Attack` : event.event;
+      const detail = [eventName, event.outcome && event.outcome !== eventName ? event.outcome : "", event.reason || "", event.note || ""].filter(Boolean).join(" - ");
+      const detailLines = doc.splitTextToSize(detail, pageWidth - margin * 2 - 48).slice(0, 2);
+      const rowHeight = Math.max(7, detailLines.length * 4.2 + 2);
+      ensureSpace(rowHeight);
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, y + rowHeight - 2, pageWidth - margin, y + rowHeight - 2);
+      doc.setFontSize(8.2);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(15, 23, 42);
+      doc.text(event.time, margin, y);
+      doc.setTextColor(34, 139, 34);
+      doc.text(event.zone || "Not tagged", margin + 20, y);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(71, 85, 105);
+      doc.text(detailLines, margin + 48, y);
+      y += rowHeight;
     }
 
     function addTargetLine(target: typeof coachTargets[number]) {
@@ -1418,18 +1623,108 @@ export default function App() {
       doc.setTextColor(126, 217, 87);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(8.5);
-      doc.text("OPEN MP4  →", pageWidth - margin - 5, y + 2, { align: "right" });
+      doc.text("PLAY CLIP", pageWidth - margin - 5, y + 2, { align: "right" });
       doc.link(margin, y - 5, pageWidth - margin * 2, 14, { url });
       y += 18;
     }
 
-    // Header
+    function addMomentumGraph() {
+      ensureSpace(42);
+      const x = margin;
+      const width = pageWidth - margin * 2;
+      const height = 32;
+      doc.setFillColor(248, 250, 252);
+      doc.setDrawColor(226, 232, 240);
+      doc.roundedRect(x, y - 4, width, height + 8, 3, 3, "FD");
+      doc.setDrawColor(203, 213, 225);
+      doc.line(x + 5, y + height / 2, x + width - 5, y + height / 2);
+      if (matchInsights.points.length > 1) {
+        const values = matchInsights.points.map((point) => point.value);
+        const min = Math.min(-1, ...values);
+        const max = Math.max(1, ...values);
+        doc.setDrawColor(92, 179, 56);
+        doc.setLineWidth(.8);
+        matchInsights.points.slice(1).forEach((point, index) => {
+          const previous = matchInsights.points[index];
+          const x1 = x + 5 + (index / (matchInsights.points.length - 1)) * (width - 10);
+          const x2 = x + 5 + ((index + 1) / (matchInsights.points.length - 1)) * (width - 10);
+          const y1 = y + height - ((previous.value - min) / (max - min)) * height;
+          const y2 = y + height - ((point.value - min) / (max - min)) * height;
+          doc.line(x1, y1, x2, y2);
+        });
+      }
+      y += height + 12;
+    }
+
+    const logoImage = document.querySelector<HTMLImageElement>(".logo-wrap img");
+
+    // Premium cover page — the uploaded team's logo drives the visual identity.
+    doc.setFillColor(...coverPalette.dark);
+    doc.rect(0, 0, pageWidth, pageHeight, "F");
+    doc.setFillColor(...coverPalette.panel);
+    doc.rect(0, 0, pageWidth, 47, "F");
+    doc.setFillColor(...mixColour(coverPalette.panel, [255, 255, 255], .08));
+    doc.rect(0, pageHeight - 42, pageWidth, 42, "F");
+    doc.setFillColor(...coverPalette.accent);
+    doc.rect(0, 0, pageWidth, 3.5, "F");
+    doc.rect(pageWidth - 3.5, 0, 3.5, pageHeight, "F");
+    doc.setDrawColor(...coverPalette.secondary);
+    doc.setLineWidth(.35);
+    doc.roundedRect(10, 10, pageWidth - 20, pageHeight - 20, 4, 4, "S");
+    doc.setDrawColor(...coverPalette.accent);
+    doc.line(margin, 92, pageWidth - margin, 92);
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(11.5);
+    doc.text("RUGBY ANALYSIS SUITE", pageWidth / 2, 17, { align: "center" });
+    doc.setFillColor(...coverPalette.accent);
+    doc.roundedRect(pageWidth / 2 - 20, 21, 40, 1.2, .6, .6, "F");
+    try { if (logoImage && logoImage.complete && logoImage.naturalWidth > 0) doc.addImage(logoImage, "PNG", pageWidth / 2 - 25, 25, 50, 50, undefined, "FAST"); } catch (_) {}
+    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .25));
+    doc.setFontSize(8.5);
+    doc.text("STATISTICAL MATCH EVALUATION", pageWidth / 2, 86, { align: "center" });
+
+    doc.setFillColor(...mixColour(coverPalette.dark, coverPalette.accent, .09));
+    doc.setDrawColor(...mixColour(coverPalette.accent, coverPalette.secondary, .45));
+    doc.roundedRect(margin, 104, pageWidth - margin * 2, 111, 5, 5, "FD");
+    if (teamLogoDataUrl) {
+      try { doc.addImage(teamLogoDataUrl, teamLogoDataUrl.includes("image/jpeg") ? "JPEG" : "PNG", pageWidth / 2 - 14, 111, 28, 28, undefined, "FAST"); } catch (_) {}
+    }
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(25);
+    doc.text(matchName || "YOUR TEAM", pageWidth / 2, teamLogoDataUrl ? 151 : 134, { align: "center", maxWidth: pageWidth - margin * 2 - 16 });
+    doc.setTextColor(160, 169, 166);
+    doc.setFontSize(10);
+    doc.text("VS", pageWidth / 2, teamLogoDataUrl ? 162 : 146, { align: "center" });
+    doc.setTextColor(235, 239, 237);
+    doc.setFontSize(19);
+    doc.text(opposition || "OPPOSITION", pageWidth / 2, teamLogoDataUrl ? 174 : 159, { align: "center", maxWidth: pageWidth - margin * 2 - 16 });
+    if (teamScore !== "" && oppositionScore !== "") {
+      doc.setFillColor(...coverPalette.accent);
+      doc.roundedRect(pageWidth / 2 - 30, 184, 60, 18, 3, 3, "F");
+      doc.setTextColor(...coverPalette.scoreText);
+      doc.setFontSize(24);
+      doc.text(`${teamScore}  -  ${oppositionScore}`, pageWidth / 2, 197, { align: "center" });
+    }
+    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .18));
+    doc.setFontSize(9.5);
+    doc.text((competition || "MATCH REVIEW").toUpperCase(), pageWidth / 2, 229, { align: "center" });
+    doc.setTextColor(...coverPalette.accent);
+    doc.setFontSize(8.5);
+    doc.text(new Date().toLocaleDateString(), pageWidth / 2, 237, { align: "center" });
+    doc.setTextColor(210, 216, 214);
+    doc.setFontSize(8);
+    doc.text("Evidence-led analysis  •  Coaching context remains essential", pageWidth / 2, pageHeight - 23, { align: "center" });
+
+    doc.addPage();
+    y = 18;
+
+    // Report header
     doc.setFillColor(2, 7, 13);
     doc.rect(0, 0, pageWidth, 38, "F");
     doc.setFillColor(126, 217, 87);
     doc.rect(0, 37, pageWidth, 1.5, "F");
 
-    const logoImage = document.querySelector<HTMLImageElement>(".logo-wrap img");
     try {
       if (logoImage && logoImage.complete && logoImage.naturalWidth > 0) {
         doc.addImage(logoImage, "PNG", margin, 7, 22, 22);
@@ -1451,21 +1746,29 @@ export default function App() {
     doc.text(`${competition || "MATCH REVIEW"}  /  ${events.length} EVENTS LOGGED  /  ${rawVideoName || "NO FOOTAGE LINKED"}`.toUpperCase(), margin, y);
     y += 8;
 
-    addSection("EXECUTIVE PERFORMANCE SUMMARY");
-    coachSummary.slice(0, 2).forEach((suggestion) => addParagraph(suggestion));
-
-    addSection("KEY STATISTICAL RISKS - REVIEW FIRST");
-    if (matchWorkOns.length) {
-      matchWorkOns.forEach((metric, index) => addInsightCard(index + 1, metric.label, `${metric.display}. Reference benchmark: ${metric.target}. This was one of the largest measured gaps in the available match data.`, "risk"));
+    addSection("KEY STATISTICAL TAKEAWAYS");
+    if (hasRecordedScore) {
+      const marginValue = Math.abs(teamScoreValue - oppositionScoreValue);
+      addParagraph(`${matchName || "The team"} ${resultType === "win" ? "won" : resultType === "loss" ? "lost" : "drew"} ${teamScoreValue}-${oppositionScoreValue}${marginValue ? ` (${marginValue}-point margin)` : ""}. The takeaways below are ordered around the indicators most consistent with that result, while retaining the strongest evidence on the other side of the performance.`);
     } else {
-      addInsightCard(1, "No statistically reliable red flag", "The available sample did not expose a target miss. Confirm the picture through video review before closing the analysis.", "positive");
+      addParagraph("No final score was entered. The strongest positive and negative indicators are therefore ordered by the size of their measured difference from the reference benchmarks.");
     }
-
-    addSection("PERFORMANCE STRENGTHS");
-    if (matchStrengths.length) {
-      matchStrengths.forEach((metric, index) => addInsightCard(index + 1, metric.label, `${metric.display}. Benchmark: ${metric.target}.`, "positive"));
+    const takeawayItems = resultType === "loss"
+      ? [...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const })), ...matchStrengths.map((metric) => ({ metric, tone: "positive" as const }))]
+      : resultType === "win"
+        ? [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))]
+        : [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))].sort((a, b) => Math.abs(b.metric.score) - Math.abs(a.metric.score));
+    if (takeawayItems.length) {
+      takeawayItems.forEach(({ metric, tone }, index) => addInsightCard(
+        index + 1,
+        `${tone === "positive" ? "POSITIVE" : "DEVELOPMENT"}  •  ${metric.label}`,
+        tone === "positive"
+          ? `${metric.display}. This met or exceeded the ${metric.target} reference and was a statistically supported positive contributor to review on video.`
+          : `${metric.display}. Reference: ${metric.target}. This was a measured performance gap with a plausible association to the result and should be checked against the corresponding clips.`,
+        tone,
+      ));
     } else {
-      addParagraph("Not enough target-beating data was logged to identify a statistically reliable strength.");
+      addInsightCard(1, "INSUFFICIENT SAMPLE", "The available match sample did not contain enough classified events to establish reliable benchmark comparisons.", "risk");
     }
 
     addSection("MATCH SNAPSHOT");
@@ -1476,6 +1779,32 @@ export default function App() {
     addKpiCard(margin + 92, "Quick Ball", `${quickBallValue.toFixed(1)}%`, quickBallValue >= 55 || allAttackPhases.length === 0);
     addKpiCard(margin + 138, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
     y = kpiY + 24;
+
+    addSection("POSSESSION & TERRITORY");
+    addShareBar("Estimated possession", matchName || "Team", possessionValue, opposition || "Opposition", oppositionPossessionValue);
+    addShareBar("Territory", "Opposition half", territoryValue, "Own half / midfield", ownTerritoryValue);
+    addParagraph("Possession and territory are time-weighted estimates derived from the intervals between consecutive tagged events. They become more representative when possession changes and pitch zones are tagged consistently throughout the match.");
+
+    addSection("EVENT LOCATIONS");
+    addParagraph("This breakdown shows where logged events started. Phase progression and kick end zones remain available in the detailed event log.");
+    zoneEvidence.forEach((zone) => addLine(
+      zone.zone,
+      `${zone.total} events | ${zone.attacks} attacks | ${zone.ballLosses} ball losses | ${zone.penaltiesConceded} penalties conceded | ${zone.penaltiesWon} won`,
+    ));
+
+    addSection("PENALTY HOTSPOTS");
+    if (penaltyConcededEvents.length && penaltyHotspot) {
+      addParagraph(`The highest concentration of penalties conceded was in ${penaltyHotspot.zone}: ${penaltyHotspot.penaltiesConceded} of ${penaltyConcededEvents.length} recorded penalties (${percent(penaltyHotspot.penaltiesConceded, penaltyConcededEvents.length)}%). Review these moments for repeated technical or decision-making patterns.`);
+      zoneEvidence.filter((zone) => zone.penaltiesConceded > 0).sort((a, b) => b.penaltiesConceded - a.penaltiesConceded).forEach((zone) => addLine(zone.zone, zone.penaltiesConceded));
+      addParagraph("Penalty reasons");
+      Object.entries(penaltyByReason).sort((a, b) => b[1] - a[1]).forEach(([reason, count]) => addLine(reason, count));
+    } else {
+      addParagraph("No penalties conceded were tagged in the event log.");
+    }
+
+    addSection("MATCH MOMENTUM");
+    addParagraph("This trend reflects the cumulative balance of positive and negative logged outcomes. It highlights periods for contextual video review rather than proving causation.");
+    addMomentumGraph();
 
     addSection("VIDEO REVIEW LIBRARY");
     if (videoReviewLinks.length) {
@@ -1554,6 +1883,10 @@ export default function App() {
     addSection("COACH SUMMARY");
     coachSummary.forEach((suggestion) => addParagraph(`• ${suggestion}`));
 
+    addSection("FULL EVENT LOCATION LOG");
+    addParagraph("Every tagged event is listed chronologically with its match time, starting pitch zone, outcome and recorded reason. Use this appendix to locate the exact footage behind each statistic.");
+    matchInsights.ordered.forEach(addEventRow);
+
     addSection("STATISTICAL MATCH EVALUATION");
     if (hasRecordedScore) {
       addParagraph(`${matchName || "The team"} ${resultType === "win" ? "won" : resultType === "loss" ? "lost" : "drew"} ${teamScoreValue}-${oppositionScoreValue}. The indicators below describe the strongest statistical associations with that result. They should be interpreted alongside coaching context and video evidence rather than as standalone proof of cause.`);
@@ -1562,21 +1895,34 @@ export default function App() {
     }
     addParagraph(`Strongest statistical indicators: ${matchStrengths.length ? matchStrengths.map((metric) => `${metric.label} (${metric.display})`).join("; ") : "no statistically reliable target-beating indicator was established"}.`);
     addParagraph(`Primary development indicators: ${matchWorkOns.length ? matchWorkOns.map((metric) => `${metric.label} (${metric.display}, reference ${metric.target})`).join("; ") : "no statistically reliable benchmark gap was established"}.`);
+    matchWorkOns.forEach((metric) => addParagraph(`${metric.label}: possible contributing factors to validate on video include ${possibleCauses[metric.label] || "execution quality, tactical context and opposition pressure"}.`));
     if (resultType === "win" && matchStrengths.length) addParagraph(`The leading positive indicators - particularly ${matchStrengths.slice(0, 2).map((metric) => metric.label).join(" and ")} - showed the strongest positive association with the result. Video review should confirm the tactical and technical behaviours behind those numbers.`);
     if (resultType === "loss" && matchWorkOns.length) addParagraph(`The largest measured gaps - particularly ${matchWorkOns.slice(0, 2).map((metric) => metric.label).join(" and ")} - were the indicators most strongly associated with the result. They are recommended priorities for contextual video review and future training design.`);
     if (resultType === "draw") addParagraph("The data suggests neither the positive indicators nor the identified gaps created a decisive enough advantage. Review the priority clips for the moments where control could have been converted into scoreboard separation.");
 
     addFooter();
     const totalPages = doc.getNumberOfPages();
-    for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
+    for (let pageNumber = 2; pageNumber <= totalPages; pageNumber += 1) {
       doc.setPage(pageNumber);
       doc.setTextColor(100, 116, 139);
       doc.setFont("helvetica", "bold");
       doc.setFontSize(7.5);
-      doc.text(`PAGE ${pageNumber} OF ${totalPages}`, pageWidth / 2, pageHeight - 8, { align: "center" });
+      doc.text(`PAGE ${pageNumber - 1} OF ${totalPages - 1}`, pageWidth / 2, pageHeight - 8, { align: "center" });
     }
-    doc.save(`${safeFileName(title)}-stat-report.pdf`);
-    notify("Stat Report Exported", `${events.length} events exported into the PDF report.`, "success");
+    if (coachPackage) {
+      if (!compilationOutputs.length) {
+        notify("Videos Required", "Generate the compilation videos before exporting the Coach Package.", "warning");
+        return;
+      }
+      const escapeHtml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[character] || character));
+      const videos = compilationOutputs.map((path) => path.split(/[\\/]/).pop() || path);
+      const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${escapeHtml(title)} Video Library</title><style>*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 80% 0,rgba(126,217,87,.13),transparent 32%),#02070d;color:#fff;font-family:Arial,sans-serif}header,main{max-width:1100px;margin:auto;padding:34px 24px}header{display:flex;gap:20px;align-items:center;border-bottom:2px solid #7ed957}header img{width:70px;height:70px;object-fit:contain;border-radius:14px}h1{font-size:34px;margin:4px 0}.score{color:#7ed957;font-size:23px;font-weight:900}.intro{margin:0 0 24px;color:#9fb0a7}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:18px}.card{background:#07120f;border:1px solid #1f3d2a;border-radius:18px;padding:18px}.card h3{margin:0 0 14px}video{width:100%;border-radius:12px;background:#000}.muted{margin:0;color:#9fb0a7;font-size:12px;letter-spacing:.08em;text-transform:uppercase}</style></head><body><header>${teamLogoDataUrl ? `<img src="${teamLogoDataUrl}" alt="Team logo">` : ""}<div><p class="muted">Rugby Analysis Suite • Video Review Library</p><h1>${escapeHtml(matchName || "Team")} vs ${escapeHtml(opposition || "Opposition")}</h1><div class="score">${escapeHtml(teamScore || "-")} - ${escapeHtml(oppositionScore || "-")}</div></div></header><main><p class="intro">Select a compilation below to review the match footage. The complete statistical evaluation is provided in Match-Report.pdf.</p><div class="grid">${videos.map((file) => `<article class="card"><h3>${escapeHtml(titleCase(file.replace(/-compilation\.mp4$/i, "").replace(/-/g, " ")))}</h3><video controls preload="metadata" src="Video%20Clips/${encodeURIComponent(file)}"></video></article>`).join("")}</div></main></body></html>`;
+      const result = await window.electronAPI.exportCoachPackage({ pdfBase64: doc.output("datauristring").split(",")[1], html, videoPaths: compilationOutputs, suggestedName: safeFileName(title) });
+      notify(result.success ? "Coach Package Ready" : "Package Export Failed", result.success ? `Report and ${videos.length} video(s) exported together.` : result.message || "The package could not be created.", result.success ? "success" : "error");
+    } else {
+      doc.save(`${safeFileName(title)}-stat-report.pdf`);
+      notify("Stat Report Exported", `${events.length} events exported into the PDF report.`, "success");
+    }
   }
 
   function sendToCompilationVideos() {
@@ -1887,7 +2233,7 @@ export default function App() {
           <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
           <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.6</span>
+          <span className="version-pill">v1.3.7</span>
         </div>
       </header>
     );
@@ -1962,6 +2308,22 @@ export default function App() {
   }
 
   function AnalysisPage() {
+    const possessionTotal = matchInsights.attackSeconds + matchInsights.defenceSeconds;
+    const attackPossession = possessionTotal ? Math.round((matchInsights.attackSeconds / possessionTotal) * 100) : 0;
+    const defencePossession = possessionTotal ? 100 - attackPossession : 0;
+    const maxHeat = Math.max(1, ...matchInsights.heat.map((item) => item.count));
+    const totalHeatEvents = matchInsights.heat.reduce((total, item) => total + item.count, 0);
+    const hottestZone = matchInsights.heat.reduce((hottest, item) => item.count > hottest.count ? item : hottest, matchInsights.heat[0]);
+    const pitchHeat = [...matchInsights.heat].reverse();
+    const lastTimelineSecond = Math.max(1, ...(matchInsights.ordered.map((event) => event.seconds)));
+    const momentumValues = matchInsights.points.map((point) => point.value);
+    const momentumMin = Math.min(-1, ...momentumValues);
+    const momentumMax = Math.max(1, ...momentumValues);
+    const momentumPath = matchInsights.points.map((point, index) => {
+      const x = matchInsights.points.length <= 1 ? 0 : (index / (matchInsights.points.length - 1)) * 100;
+      const y = 36 - ((point.value - momentumMin) / (momentumMax - momentumMin)) * 32;
+      return `${index ? "L" : "M"}${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
     return (
       <main className="ras-shell analysis-shell">
         <div className="grid-bg" />
@@ -1974,6 +2336,8 @@ export default function App() {
           <button className="primary-btn" onClick={saveProject}>Save Match</button>
           <button className="danger-btn" onClick={clearWorkspace}>Clear Match</button>
           <button className="secondary-btn" onClick={() => exportPDFReport()}>Export PDF</button>
+          <button className="secondary-btn" onClick={() => setShowMatchCheck(true)}>Match Check</button>
+          <button className="primary-btn" onClick={() => exportPDFReport(false, true)}>Export Coach Package</button>
           <button className="primary-btn wide-action" onClick={sendToCompilationVideos}>Send Events to Compilation Tool</button>
         </section>
 
@@ -1986,6 +2350,12 @@ export default function App() {
             <span>-</span>
             <input aria-label="Opposition score" type="number" min="0" placeholder="Opp score" value={oppositionScore} onChange={(event) => setOppositionScore(event.target.value)} />
           </div>
+          <label className="team-logo-input">
+            <input type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => loadTeamLogo(event.target.files?.[0])} />
+            {teamLogoDataUrl ? <img src={teamLogoDataUrl} alt="Team logo preview" /> : <span>+</span>}
+            <div><strong>{teamLogoDataUrl ? "Team logo ready" : "Add team logo"}</strong><small>Used on the report cover and customer package</small></div>
+            {teamLogoDataUrl && <button type="button" onClick={(event) => { event.preventDefault(); setTeamLogoDataUrl(""); }}>Remove</button>}
+          </label>
         </section>
 
         <section className="analysis-workspace">
@@ -2039,6 +2409,39 @@ export default function App() {
           </div>
         </section>
 
+        <section className="match-insights-grid">
+          <article className="panel possession-card">
+            <div className="section-head"><div><p className="eyebrow">Possession Clock</p><h2>{attackPossession}% Attack</h2></div><span>{defencePossession}% Defence</span></div>
+            <div className="possession-bar"><i style={{ width: `${attackPossession}%` }} /><b style={{ width: `${defencePossession}%` }} /></div>
+            <div className="possession-times"><span>Attack {formatTime(matchInsights.attackSeconds)}</span><span>Defence {formatTime(matchInsights.defenceSeconds)}</span></div>
+          </article>
+          <article className="panel territory-heat-card">
+            <div className="section-head"><div><p className="eyebrow">Territory Heatmap</p><h2>Where the Match Was Played</h2></div><span>{totalHeatEvents} located events</span></div>
+            <div className="heatmap-direction"><span>Own try line</span><b>Attacking direction <i>→</i></b><span>Opp try line</span></div>
+            <div className="rugby-territory-map" aria-label="Territory event heatmap from own 22 to opposition 22">
+              {pitchHeat.map((item) => {
+                const percentage = totalHeatEvents ? Math.round((item.count / totalHeatEvents) * 100) : 0;
+                return <div key={item.zone} className={`territory-zone ${hottestZone?.zone === item.zone && item.count ? "hot" : ""}`} style={{ "--heat": item.count / maxHeat } as React.CSSProperties}>
+                  <span>{item.zone}</span><strong>{item.count}</strong><small>{percentage}% of events</small>
+                </div>;
+              })}
+            </div>
+            <div className="heatmap-summary">
+              <span className="heatmap-pulse" />
+              {totalHeatEvents ? <p><strong>Highest activity: {hottestZone.zone}</strong><small>{hottestZone.count} events concentrated in this area</small></p> : <p><strong>Waiting for field-position data</strong><small>The pitch will build as zones are logged.</small></p>}
+            </div>
+          </article>
+          <article className="panel momentum-card">
+            <div className="section-head"><div><p className="eyebrow">Momentum</p><h2>Match Control Trend</h2></div></div>
+            {momentumPath ? <svg viewBox="0 0 100 40" preserveAspectRatio="none" aria-label="Match momentum graph"><line x1="0" x2="100" y1="20" y2="20" /><path d={momentumPath} /></svg> : <div className="mini-empty">Log events to build momentum.</div>}
+          </article>
+          <article className="panel possession-timeline-card">
+            <div className="section-head"><div><p className="eyebrow">Possession Timeline</p><h2>How the Match Flowed</h2></div><span>{matchInsights.segments.length} sequences</span></div>
+            <div className="possession-timeline">{matchInsights.segments.length ? matchInsights.segments.map((segment, index) => <button key={`${segment.start}-${index}`} className={segment.mode} style={{ left: `${(segment.start / lastTimelineSecond) * 100}%`, width: `${Math.max(1.2, ((segment.end - segment.start) / lastTimelineSecond) * 100)}%` }} title={`${segment.mode} • ${segment.zone} • ${formatTime(segment.start)}`}>{segment.zone}</button>) : <div className="mini-empty">Possession sequences will appear here.</div>}</div>
+            <div className="timeline-legend"><span><i className="attack" />Attack</span><span><i className="defence" />Defence</span></div>
+          </article>
+        </section>
+
         <section className="panel event-log-panel compact-log live-log analysis-event-log">
           <div className="panel-head log-head">
             <div><p className="eyebrow">Event Log</p><h2>{events.length} Tagged Events</h2></div>
@@ -2047,6 +2450,7 @@ export default function App() {
           {events.length === 0 ? <div className="empty-state">Load match footage and start tagging events.</div> : <EventLogList />}
         </section>
         {editingEvent && <EditEventModal />}
+        {showMatchCheck && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Match Completion Check</p><h2>{completionChecks.filter((item) => item.passed).length} of {completionChecks.length} ready</h2><p>Complete these checks before generating a client-facing report or Coach Package.</p><div className="quality-list completion-list">{completionChecks.map((item) => <div className={item.passed ? "passed" : "pending"} key={item.label}><span>{item.passed ? "✓" : "!"}</span><p>{item.label}</p></div>)}</div><div className="modal-actions"><button className="primary-btn" onClick={() => setShowMatchCheck(false)}>Return to Match</button></div></section></div>}
         <NoticeToast />
       </main>
     );
@@ -2541,7 +2945,7 @@ export default function App() {
   function ReliabilityModals() {
     return <>
       {recoveryCandidate && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Recovered Session</p><h2>{recoveryCandidate.saved.matchName || "Previous match"}{recoveryCandidate.saved.opposition ? ` vs ${recoveryCandidate.saved.opposition}` : ""}</h2><p>We found an autosaved session from {recoveryCandidate.saved.savedAt ? new Date(recoveryCandidate.saved.savedAt).toLocaleString() : "your previous analysis"}.</p><div className="recovery-summary"><strong>{recoveryCandidate.saved.events?.length || 0}</strong><span>events recovered</span><strong>{recoveryCandidate.saved.rawVideoName ? "Ready" : "Not loaded"}</strong><span>match footage</span></div><div className="modal-actions"><button className="secondary-btn" onClick={discardRecoveredSession}>Discard</button><button className="primary-btn" onClick={restoreRecoveredSession}>Restore Session</button></div></section></div>}
-      {showExportCheck && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Export Quality Check</p><h2>{exportWarnings.length} item{exportWarnings.length === 1 ? "" : "s"} to review</h2><p>The report can still be exported, but these checks may affect client-facing accuracy.</p><div className="quality-list">{exportWarnings.map((warning) => <div key={warning}><span>!</span><p>{warning}</p></div>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={() => setShowExportCheck(false)}>Return to Analysis</button><button className="primary-btn" onClick={() => { setShowExportCheck(false); exportPDFReport(true); }}>Export Anyway</button></div></section></div>}
+      {showExportCheck && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Export Quality Check</p><h2>{exportWarnings.length} item{exportWarnings.length === 1 ? "" : "s"} to review</h2><p>The report can still be exported, but these checks may affect client-facing accuracy.</p><div className="quality-list">{exportWarnings.map((warning) => <div key={warning}><span>!</span><p>{warning}</p></div>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={() => setShowExportCheck(false)}>Return to Analysis</button><button className="primary-btn" onClick={() => { setShowExportCheck(false); exportPDFReport(true, pendingCoachPackage); }}>Export Anyway</button></div></section></div>}
       {showShortcutGuide && <div className="reliability-modal-backdrop" onMouseDown={() => setShowShortcutGuide(false)}><section className="reliability-modal shortcut-guide" onMouseDown={(event) => event.stopPropagation()}><button className="notice-close" onClick={() => setShowShortcutGuide(false)}>×</button><p className="eyebrow">{analystProfile.name}'s Controls</p><h2>Shortcut Cheat Sheet</h2><p>Press <kbd>?</kbd> anywhere to open or close this guide.</p><div className="shortcut-guide-grid">{[
         ["Playback", [["Play / Pause",keybinds.playPause],["Back 10s",keybinds.seekBack],["Forward 10s",keybinds.seekForward],["Faster",keybinds.speedUp],["Slower",keybinds.speedDown]]],
         ["Attack Phase", [["Gainline Won",keybinds.gainlineWon],["Neutral",keybinds.gainlineNeutral],["Lost",keybinds.gainlineLost],["Quick Ruck",keybinds.ruckQuick],["Average Ruck",keybinds.ruckAverage],["Slow Ruck",keybinds.ruckSlow],["Complete Phase",keybinds.completePhase]]],

@@ -113,20 +113,41 @@ async function showPatchNotesOnFirstLaunch() {
 
   if (lastShownVersion === currentVersion) return;
 
-  await dialog.showMessageBox(mainWindow, {
-    type: "info",
-    title: `Rugby Analysis Suite v${currentVersion}`,
-    message: "Update installed successfully",
-    detail: `What's new:\n\n${notes.map((note) => `• ${note}`).join("\n")}`,
-    buttons: ["Start Analysing"],
-    defaultId: 0,
+  const escapeHtml = (value) => String(value).replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[character]));
+  let logoData = "";
+  try {
+    const logoBuffer = fs.readFileSync(path.join(app.getAppPath(), "dist", "ras-logo.png"));
+    logoData = `data:image/png;base64,${logoBuffer.toString("base64")}`;
+  } catch (_) {}
+
+  const patchWindow = new BrowserWindow({
+    parent: mainWindow,
+    modal: true,
+    width: 760,
+    height: 720,
+    minWidth: 620,
+    minHeight: 620,
+    resizable: true,
+    frame: false,
+    show: false,
+    backgroundColor: "#02070d",
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
   });
 
-  try {
-    fs.writeFileSync(statePath, JSON.stringify({ lastShownVersion: currentVersion }, null, 2));
-  } catch (error) {
-    console.error("Could not save patch notes state:", error);
-  }
+  const noteCards = notes.map((note, index) => `<article style="--delay:${index * 85}ms"><span>${String(index + 1).padStart(2, "0")}</span><p>${escapeHtml(note)}</p><i>NEW</i></article>`).join("");
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><style>
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 85% 5%,rgba(126,217,87,.16),transparent 31%),#02070d;color:#fff;font-family:Inter,Segoe UI,Arial,sans-serif;overflow:hidden}.shell{height:100vh;display:grid;grid-template-rows:auto 1fr auto;position:relative}.grid{position:absolute;inset:0;opacity:.18;background-image:linear-gradient(rgba(126,217,87,.12) 1px,transparent 1px),linear-gradient(90deg,rgba(126,217,87,.12) 1px,transparent 1px);background-size:42px 42px;mask-image:linear-gradient(to bottom,#000,transparent 72%);pointer-events:none}.hero{position:relative;padding:30px 34px 24px;border-bottom:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:18px;animation:reveal .55s cubic-bezier(.2,.8,.2,1)}.hero img{width:64px;height:64px;object-fit:contain;border-radius:16px;filter:drop-shadow(0 0 20px rgba(126,217,87,.2))}.eyebrow{margin:0 0 6px;color:#7ed957;font-size:11px;font-weight:950;letter-spacing:.25em;text-transform:uppercase}.hero h1{margin:0;font-size:34px;letter-spacing:-.04em}.hero h1 b{color:#7ed957}.version{margin-left:auto;padding:10px 14px;border:1px solid rgba(126,217,87,.28);border-radius:999px;background:rgba(126,217,87,.09);color:#bdf7a5;font-weight:900}.progress{position:absolute;left:0;bottom:-1px;width:100%;height:2px;background:rgba(255,255,255,.05);overflow:hidden}.progress i{display:block;width:100%;height:100%;background:linear-gradient(90deg,transparent,#7ed957,transparent);animation:sweep 2.3s ease-in-out infinite}.content{position:relative;overflow:auto;padding:24px 34px 18px}.content::-webkit-scrollbar{width:8px}.content::-webkit-scrollbar-thumb{background:rgba(126,217,87,.24);border-radius:99px}.intro{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:16px}.intro h2{margin:0;font-size:20px}.intro p{margin:0;color:#91a39a;font-size:12px}.cards{display:grid;gap:10px}.cards article{opacity:0;transform:translateY(16px);display:grid;grid-template-columns:38px 1fr auto;align-items:center;gap:13px;padding:15px;border:1px solid rgba(255,255,255,.08);border-radius:16px;background:linear-gradient(135deg,rgba(126,217,87,.075),rgba(255,255,255,.025));animation:cardIn .45s cubic-bezier(.2,.8,.2,1) forwards;animation-delay:calc(350ms + var(--delay));transition:.2s}.cards article:hover{transform:translateX(4px)!important;border-color:rgba(126,217,87,.3);background:rgba(126,217,87,.09)}.cards span{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:rgba(126,217,87,.14);color:#7ed957;font-size:11px;font-weight:950}.cards p{margin:0;color:#dfe9e3;font-size:13px;line-height:1.45}.cards i{font-style:normal;color:#7ed957;font-size:8px;font-weight:950;letter-spacing:.14em}.footer{position:relative;padding:18px 34px 24px;border-top:1px solid rgba(255,255,255,.08);display:flex;align-items:center;gap:16px;background:rgba(2,7,13,.92)}.footer p{margin:0;color:#91a39a;font-size:11px;line-height:1.5;flex:1}.footer button{border:0;border-radius:15px;padding:15px 25px;background:linear-gradient(135deg,#7ed957,#5cb338);color:#061109;font-weight:950;text-transform:uppercase;letter-spacing:.08em;cursor:pointer;box-shadow:0 12px 35px rgba(92,179,56,.25);transition:.2s}.footer button:hover{transform:translateY(-2px);box-shadow:0 17px 42px rgba(92,179,56,.35)}@keyframes reveal{from{opacity:0;transform:translateY(-15px)}to{opacity:1;transform:none}}@keyframes cardIn{to{opacity:1;transform:none}}@keyframes sweep{0%{transform:translateX(-100%)}100%{transform:translateX(100%)}}@media(max-width:650px){.hero,.content,.footer{padding-left:20px;padding-right:20px}.hero h1{font-size:26px}.version{display:none}}
+  </style></head><body><div class="shell"><div class="grid"></div><header class="hero">${logoData ? `<img src="${logoData}" alt="">` : ""}<div><p class="eyebrow">Update Installed Successfully</p><h1>What’s new in <b>v${escapeHtml(currentVersion)}</b></h1></div><span class="version">v${escapeHtml(currentVersion)}</span><div class="progress"><i></i></div></header><main class="content"><div class="intro"><div><p class="eyebrow">Release Highlights</p><h2>Your analysis workspace just levelled up.</h2></div><p>${notes.length} improvements ready</p></div><section class="cards">${noteCards}</section></main><footer class="footer"><p>These notes appear once after each update.<br>Everything is ready when you are.</p><button onclick="window.close()">Enter the Suite →</button></footer></div></body></html>`;
+
+  patchWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  patchWindow.once("ready-to-show", () => patchWindow.show());
+  patchWindow.on("closed", () => {
+    try {
+      fs.writeFileSync(statePath, JSON.stringify({ lastShownVersion: currentVersion }, null, 2));
+    } catch (error) {
+      console.error("Could not save patch notes state:", error);
+    }
+  });
 }
 
 function setupAutoUpdater() {
@@ -357,6 +378,38 @@ ipcMain.handle("generate-test-clip", async (_event, data) => {
     ]);
 
     return { success: true, outputPath: saveResult.filePath };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle("export-coach-package", async (_event, data) => {
+  try {
+    const folderResult = await dialog.showOpenDialog({ title: "Choose Folder For Coach Package", properties: ["openDirectory", "createDirectory"] });
+    if (folderResult.canceled || !folderResult.filePaths.length) return { success: false, message: "Coach Package export cancelled." };
+    const selectedFolder = folderResult.filePaths[0];
+    const packageName = `${safeFileName(data.suggestedName || "Rugby-Analysis")}-Coach-Package`;
+    const packageFolder = path.join(selectedFolder, packageName);
+    const videoFolder = path.join(packageFolder, "Video Clips");
+    const legacyVideoFolder = path.join(packageFolder, "videos");
+    const videoLibraryPath = path.join(packageFolder, "Open-Video-Library.html");
+    const legacyCoachPage = path.join(packageFolder, "Open-Coach-Package.html");
+    const redundantSourceFiles = [];
+    fs.mkdirSync(videoFolder, { recursive: true });
+    fs.writeFileSync(path.join(packageFolder, "Match-Report.pdf"), Buffer.from(data.pdfBase64, "base64"));
+    fs.writeFileSync(videoLibraryPath, String(data.html || ""), "utf8");
+    for (const sourcePath of data.videoPaths || []) {
+      if (!fs.existsSync(sourcePath)) throw new Error(`Compilation video not found: ${path.basename(sourcePath)}`);
+      const destinationPath = path.join(videoFolder, path.basename(sourcePath));
+      if (path.resolve(sourcePath) !== path.resolve(destinationPath)) fs.copyFileSync(sourcePath, destinationPath);
+      // Compilation files generated directly into the chosen customer-export
+      // folder are staging files. Remove those only after every copy succeeds.
+      if (path.resolve(path.dirname(sourcePath)) === path.resolve(selectedFolder)) redundantSourceFiles.push(sourcePath);
+    }
+    if (fs.existsSync(legacyVideoFolder) && path.resolve(legacyVideoFolder) !== path.resolve(videoFolder)) fs.rmSync(legacyVideoFolder, { recursive: true, force: true });
+    if (fs.existsSync(legacyCoachPage) && path.resolve(legacyCoachPage) !== path.resolve(videoLibraryPath)) fs.unlinkSync(legacyCoachPage);
+    redundantSourceFiles.forEach((sourcePath) => { if (fs.existsSync(sourcePath)) fs.unlinkSync(sourcePath); });
+    return { success: true, folder: packageFolder };
   } catch (error) {
     return { success: false, message: error.message };
   }

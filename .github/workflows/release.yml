@@ -30,7 +30,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "Desktop icon, streamlined kicking workflow, and release reliability improvements."
+            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "Adds possession and territory analysis, pitch-zone event evidence, penalty hotspots, full event-location logs, and upgraded coach-package reports."
           }
           gh release upload $tag `
             "release/Rugby-Analysis-Suite-Setup.exe" `
