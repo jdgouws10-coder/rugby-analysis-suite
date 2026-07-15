@@ -51,6 +51,16 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.3.9": [
+      "Redesigned the customer report cover as a premium, team-colour-driven match dossier.",
+      "Reordered reports around coaching priority: key takeaways, set piece, kicking, attack, Gold Zone, defence, discipline and territory.",
+      "Added numbered, match-specific contributing-factor explanations linked directly to each statistical takeaway.",
+      "Expanded attack breakdowns with Scrum, Lineout, Maul and detailed lineout-launch attempts and successful outcomes.",
+      "Removed redundant opposition-won controls and the standalone maul launcher while retaining opposition lineout and scrum steals.",
+      "Merged missed-tackle clips logged within two seconds to avoid duplicate sequences.",
+      "Preserved compilation videos generated with different timing presets inside the same Coach Package.",
+      "Improved report heatmaps, Gold Zone evidence, ball-security analysis and video-review flow.",
+    ],
     "1.3.6": [
       "Redesigned the Rugby Performance Report with evidence-led priorities and a Statistical Match Evaluation.",
       "Added clickable compilation-video links to exported reports.",
@@ -416,7 +426,7 @@ ipcMain.handle("export-coach-package", async (_event, data) => {
 });
 
 ipcMain.handle("generate-compilations", async (_event, data) => {
-  const { videoPath, groups } = data;
+  const { videoPath, groups, variant } = data;
 
   if (!videoPath) return { success: false, message: "No raw video selected." };
   if (!groups || groups.length === 0) return { success: false, message: "No compilation groups available." };
@@ -440,6 +450,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
     for (const group of groups) {
       const sortedClips = [...group.clips].sort((a, b) => Number(a.rawStart) - Number(b.rawStart));
       const groupSlug = safeFileName(group.type);
+      const variantSlug = safeFileName(variant || "coach");
       const groupTempDir = path.join(tempRoot, groupSlug);
       fs.mkdirSync(groupTempDir, { recursive: true });
 
@@ -484,7 +495,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
       const listPath = path.join(groupTempDir, "concat-list.txt");
       fs.writeFileSync(listPath, clipPaths.map(quoteConcatPath).join("\n"));
 
-      const outputPath = path.join(outputFolder, `${groupSlug}-compilation.mp4`);
+      const outputPath = path.join(outputFolder, `${groupSlug}-${variantSlug}-compilation.mp4`);
 
       await runFFmpeg(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]);
       outputs.push(outputPath);

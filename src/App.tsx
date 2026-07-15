@@ -24,6 +24,7 @@ declare global {
       generateCompilations: (data: {
         videoPath: string;
         groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
+        variant: string;
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
       exportCoachPackage: (data: { pdfBase64: string; html: string; videoPaths: string[]; suggestedName: string }) => Promise<{ success: boolean; folder?: string; message?: string }>;
       onUpdateProgress?: (callback: (progress: { percent: number; transferred?: number; total?: number }) => void) => () => void;
@@ -90,6 +91,8 @@ type EventLog = {
   event: string;
   zone: string;
   attackType?: string;
+  launchType?: "Scrum" | "Lineout" | "Maul";
+  lineoutLaunch?: "Down and Out" | "Off the Top" | "Maul" | "Normal";
   phases?: number;
   outcome?: string;
   reason?: string;
@@ -126,9 +129,14 @@ type EditableEvent = {
 };
 
 const pitchZones = ["Opp 22", "Opp Half", "Midfield", "Own Half", "Own 22"];
-const attackTypes = ["Set Piece", "Transition", "Kick Return", "Penalty Tap", "Maul"];
+const attackTypes = ["Transition", "Kick Return", "Penalty Tap"];
 const successfulAttackOutcomes = ["Penalty Won", "Try Scored", "3 Points Taken", "Held Up – Retain Ball", "Contestable Kick Regained", "Successful Exit", "Positive Clearance"];
 const goldZoneSuccessOutcomes = ["Try Scored", "3 Points Taken"];
+
+function isSuccessfulAttackEvent(event: EventLog) {
+  return successfulAttackOutcomes.includes(event.outcome || "")
+    || ["Maul Retained", "Maul Penalty Won", "Maul Try"].includes(event.outcome || "");
+}
 
 const ballLostReasons = [
   "Knock-on",
@@ -183,10 +191,11 @@ const penaltyConcededReasons = [
 
 const clipTypeOptions = [
   "Gold Zone Entries",
-  "Set Piece Attack",
+  "Scrum Launch",
+  "Lineout Launch",
   "Transition Attack",
   "Kick Return Attack",
-  "Maul Attack",
+  "Maul Launch",
   "Penalty Won",
   "Try Scored",
   "3 Points Taken",
@@ -216,6 +225,16 @@ const clipTypeOptions = [
   "Maul Lost",
 ];
 
+const defaultReviewClipTypes = [
+  "Ball Lost",
+  "Try Conceded",
+  "Gold Zone Entries",
+  "Lineout Lost",
+  "Scrum Lost",
+  "Tackle Missed",
+  "Penalty Conceded",
+];
+
 const clipPaddingPresets: {
   id: ClipPaddingPresetId;
   title: string;
@@ -223,8 +242,8 @@ const clipPaddingPresets: {
   before: number;
   after: number;
 }[] = [
-  { id: "quick", title: "Quick Review", description: "Short clips for fast review.", before: 10, after: 5 },
-  { id: "coach", title: "Coach Review", description: "Best default for rugby context.", before: 20, after: 8 },
+  { id: "quick", title: "Quick Review", description: "Shortest clips for rapid event review.", before: 6, after: 3 },
+  { id: "coach", title: "Coach Review", description: "Enough build-up for coaching context.", before: 15, after: 3 },
   { id: "deep", title: "Deep Analysis", description: "Longer build-up and follow-up.", before: 30, after: 10 },
 ];
 
@@ -314,7 +333,7 @@ function toFileUrl(filePath: string) {
 function clipLabel(event: EventLog) {
   const reason = event.reason ? ` • ${event.reason}` : "";
   if (event.kickType) return `${event.kickType} Kick • ${event.zone}${event.endZone ? ` to ${event.endZone}` : ""} • ${event.outcome}${reason}`;
-  if (event.category === "attack") return `${event.attackType} Attack • ${event.zone} • ${event.outcome}${reason}`;
+  if (event.category === "attack") return `${event.attackType} Attack${event.lineoutLaunch ? ` • ${event.lineoutLaunch} lineout` : ""} • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "kick") return `Kick Event • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "defence") return `${event.event} • ${event.zone}${reason}`;
   if (event.category === "maul") return `${event.event} • ${event.zone}${reason}`;
@@ -323,6 +342,9 @@ function clipLabel(event: EventLog) {
 
 function matchesClipType(event: EventLog, type: string) {
   if (type === "Gold Zone Entries") return event.category === "attack" && (event.goldZoneEntry === true || (event.goldZoneEntry === undefined && event.zone === "Opp 22"));
+  if (type === "Scrum Launch") return event.launchType === "Scrum";
+  if (type === "Lineout Launch") return event.launchType === "Lineout";
+  if (type === "Maul Launch") return event.launchType === "Maul" || event.lineoutLaunch === "Maul";
   if (type.endsWith("Attack")) return event.category === "attack" && event.attackType === type.replace(" Attack", "");
   if (["Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"].includes(type)) {
     return event.outcome === type;
@@ -567,6 +589,10 @@ export default function App() {
   const [attackActive, setAttackActive] = useState(false);
   const [attackStartZone, setAttackStartZone] = useState("");
   const [currentAttackType, setCurrentAttackType] = useState("");
+  const [currentLaunchType, setCurrentLaunchType] = useState<"Scrum" | "Lineout" | null>(null);
+  const [currentLineoutLaunch, setCurrentLineoutLaunch] = useState<"Down and Out" | "Off the Top" | null>(null);
+  const [lineoutLaunchPrompt, setLineoutLaunchPrompt] = useState(false);
+  const [maulFromLineout, setMaulFromLineout] = useState(false);
   const [phaseCount, setPhaseCount] = useState(0);
   const [phasePerformance, setPhasePerformance] = useState<PhasePerformance[]>([]);
   const [pendingGainline, setPendingGainline] = useState<GainlineResult | null>(null);
@@ -592,7 +618,7 @@ export default function App() {
   const [isOptimisingVideo, setIsOptimisingVideo] = useState(false);
   const [optimiseAttempted, setOptimiseAttempted] = useState(false);
 
-  const [selectedClipTypes, setSelectedClipTypes] = useState<string[]>(["Gold Zone Entries"]);
+  const [selectedClipTypes, setSelectedClipTypes] = useState<string[]>(defaultReviewClipTypes);
   const [clipPaddingPresetId, setClipPaddingPresetId] = useState<ClipPaddingPresetId>("coach");
   const [generatedClips, setGeneratedClips] = useState<ClipGroup[]>([]);
   const [compilationOutputs, setCompilationOutputs] = useState<string[]>([]);
@@ -605,7 +631,7 @@ export default function App() {
   const [showMatchCheck, setShowMatchCheck] = useState(false);
   const [showShortcutGuide, setShowShortcutGuide] = useState(false);
   const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
-  const [appVersion, setAppVersion] = useState("1.3.8");
+  const [appVersion, setAppVersion] = useState("1.3.9");
   const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
 
   const attacks = events.filter((event) => event.category === "attack");
@@ -613,6 +639,10 @@ export default function App() {
   const totalAttacks = attacks.length;
   const successfulAttacks = attacks.filter((event) => successfulAttackOutcomes.includes(event.outcome || "")).length;
   const ballLosses = attacks.filter((event) => event.outcome === "Ball Lost").length;
+  const lineoutLaunchEvents = events.filter((event) => event.launchType === "Lineout" || event.lineoutLaunch === "Maul");
+  const downAndOutLineoutLaunches = lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Down and Out" || event.lineoutLaunch === "Normal").length;
+  const offTopLineoutLaunches = lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Off the Top").length;
+  const lineoutMaulLaunches = lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Maul").length;
   const lineoutsWon = events.filter((event) => event.event === "Lineout Won").length;
   const lineoutsLost = events.filter((event) => event.event === "Lineout Lost").length;
   const scrumsWon = events.filter((event) => event.event === "Scrum Won").length;
@@ -635,12 +665,13 @@ export default function App() {
   const tackleMade = defenceEvents.filter((event) => event.event === "Tackle Made").length;
   const tackleMissed = defenceEvents.filter((event) => event.event === "Tackle Missed").length;
   const ballWon = defenceEvents.filter((event) => event.event === "Ball Won" || event.event === "Opponent Lineout Stolen" || event.event === "Opponent Scrum Stolen").length;
-  const penaltiesConceded = defenceEvents.filter((event) => event.event === "Penalty Conceded" || event.outcome === "Penalty Conceded").length;
   const rippedBalls = defenceEvents.filter((event) => event.reason === "Ripped Ball").length;
   const oppKicks = defenceEvents.filter((event) => event.reason === "Opp Kick").length;
   const opponentLineoutsStolen = defenceEvents.filter((event) => event.event === "Opponent Lineout Stolen" || event.outcome === "Opponent Lineout Stolen").length;
   const opponentScrumsStolen = defenceEvents.filter((event) => event.event === "Opponent Scrum Stolen" || event.outcome === "Opponent Scrum Stolen").length;
   const triesConceded = defenceEvents.filter((event) => event.event === "Try Conceded" || event.outcome === "Try Conceded").length;
+  const triesScored = attacks.filter((event) => event.outcome === "Try Scored").length + events.filter((event) => event.category === "maul" && event.outcome === "Maul Try").length;
+  const threePointScores = attacks.filter((event) => event.outcome === "3 Points Taken").length;
   const allAttackPhases = attacks.flatMap((event) => event.phasePerformance || []);
   const gainlineWon = allAttackPhases.filter((phase) => phase.gainline === "Won").length;
   const gainlineSuccess = Number(percent(gainlineWon, allAttackPhases.length));
@@ -864,7 +895,7 @@ export default function App() {
     try { saved = JSON.parse(localStorage.getItem(`ras-last-session-${id}`) || "null"); } catch (_) {}
     setMatchName(""); setOpposition(""); setCompetition(""); setTeamScore(""); setOppositionScore(""); setTeamLogoDataUrl(""); setEvents([]); setRawVideoName(""); setRawVideoPath(""); setRawVideoUrl(""); setPlaybackVideoUrl(""); setLastSessionSaved("");
     setRecoveryCandidate(saved ? { id, saved } : null);
-    setGeneratedClips([]); setProfileSelected(true); setView("home");
+    setGeneratedClips([]); setCompilationOutputs([]); setProfileSelected(true); setView("home");
   }
 
   function restoreRecoveredSession() {
@@ -917,6 +948,7 @@ export default function App() {
     setPlaybackVideoUrl(file.url);
     setOptimiseAttempted(false);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     setStatusMessage(`${file.name} loaded.`);
     notify("Match Footage Loaded", file.name, "success");
   }
@@ -973,6 +1005,7 @@ export default function App() {
     };
     setEvents((prev) => [newEvent, ...prev]);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
   }
 
   function addSetPiece(eventName: string) {
@@ -1011,11 +1044,14 @@ export default function App() {
     }
   }
 
-  function startAttack(type: string) {
+  function startAttack(type: string, launchType: "Scrum" | "Lineout" | null = null, lineoutLaunch: "Down and Out" | "Off the Top" | null = null) {
     if (!requireVideo()) return;
     setAttackActive(true);
     setAttackStartZone(selectedZone);
     setCurrentAttackType(type);
+    setCurrentLaunchType(launchType);
+    setCurrentLineoutLaunch(lineoutLaunch);
+    setLineoutLaunchPrompt(false);
     setPhaseCount(0);
     setPhasePerformance([]);
     setPendingGainline(null);
@@ -1025,6 +1061,23 @@ export default function App() {
     const isNewGoldZoneEntry = selectedZone === "Opp 22" && !possessionInGoldZone;
     setActiveGoldZoneEntry(isNewGoldZoneEntry);
     if (isNewGoldZoneEntry) setPossessionInGoldZone(true);
+  }
+
+  function startScrumLaunch() {
+    if (!requireVideo()) return;
+    addSetPiece("Scrum Won");
+    startAttack("Scrum", "Scrum");
+  }
+
+  function chooseLineoutLaunch(style: "Down and Out" | "Off the Top" | "Maul") {
+    if (!requireVideo()) return;
+    addSetPiece("Lineout Won");
+    setLineoutLaunchPrompt(false);
+    if (style === "Maul") {
+      startMaul(true);
+      return;
+    }
+    startAttack("Lineout", "Lineout", style);
   }
 
   function completePhase() {
@@ -1042,6 +1095,8 @@ export default function App() {
       category: "attack",
       event: `${currentAttackType} Attack`,
       attackType: currentAttackType,
+      launchType: currentLaunchType || undefined,
+      lineoutLaunch: currentLineoutLaunch || undefined,
       phases: phaseCount,
       outcome,
       reason,
@@ -1062,6 +1117,11 @@ export default function App() {
     setAttackActive(false);
     setAttackStartZone("");
     setCurrentAttackType("");
+    setCurrentLaunchType(null);
+    setCurrentLineoutLaunch(null);
+    setLineoutLaunchPrompt(false);
+    setCurrentLaunchType(null);
+    setCurrentLineoutLaunch(null);
     setPhaseCount(0);
     setPhasePerformance([]);
     setPendingGainline(null);
@@ -1083,8 +1143,9 @@ export default function App() {
     }
   }
 
-  function startMaul() {
+  function startMaul(fromLineout = false) {
     if (!requireVideo()) return;
+    setMaulFromLineout(fromLineout);
     setMaulActive(true);
     setMaulStartZone(selectedZone);
     setMaulPhaseCount(0);
@@ -1109,12 +1170,16 @@ export default function App() {
       outcome,
       phases: maulPhaseCount,
       zone: maulStartZone,
+      launchType: "Maul",
+      lineoutLaunch: maulFromLineout ? "Maul" : undefined,
     });
 
     const retainedZone = maulStartZone;
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
+    setMaulFromLineout(false);
+    setMaulFromLineout(false);
 
     if (outcome === "Maul Retained") {
       setAttackActive(true);
@@ -1144,6 +1209,7 @@ export default function App() {
   function undoLastEvent() {
     setEvents((prev) => prev.slice(1));
     setGeneratedClips([]);
+    setCompilationOutputs([]);
   }
 
   function undoLastPhase() {
@@ -1157,6 +1223,9 @@ export default function App() {
     setAttackActive(false);
     setAttackStartZone("");
     setCurrentAttackType("");
+    setCurrentLaunchType(null);
+    setCurrentLineoutLaunch(null);
+    setLineoutLaunchPrompt(false);
     setPhaseCount(0);
     setPhasePerformance([]);
     setPendingGainline(null);
@@ -1168,6 +1237,7 @@ export default function App() {
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
+    setMaulFromLineout(false);
     notify("Returned", "Current logging step cancelled. No event was added.", "info");
   }
 
@@ -1195,6 +1265,9 @@ export default function App() {
     setAttackActive(false);
     setAttackStartZone("");
     setCurrentAttackType("");
+    setCurrentLaunchType(null);
+    setCurrentLineoutLaunch(null);
+    setLineoutLaunchPrompt(false);
     setPhaseCount(0);
     setPhasePerformance([]);
     setPendingGainline(null);
@@ -1210,6 +1283,7 @@ export default function App() {
     setMaulActive(false);
     setMaulStartZone("");
     setMaulPhaseCount(0);
+    setMaulFromLineout(false);
     setRawVideoName("");
     setRawVideoPath("");
     setRawVideoUrl("");
@@ -1217,7 +1291,9 @@ export default function App() {
     setOptimiseAttempted(false);
     setIsOptimisingVideo(false);
     setPlaybackRate(1);
+    setSelectedClipTypes(defaultReviewClipTypes);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     setStatusMessage("Workspace cleared.");
     notify("Match Cleared", "The match, events and loaded footage were cleared.", "info");
   }
@@ -1232,7 +1308,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.3.8",
+      version: "1.3.9",
       matchName,
       opposition,
       competition,
@@ -1284,8 +1360,9 @@ export default function App() {
         setPlaybackVideoUrl(data.playbackVideoUrl || data.rawVideoUrl || "");
         setPanelSwitching(data.panelSwitching || "automatic");
         setClipPaddingPresetId(data.clipPaddingPresetId || "coach");
-        setSelectedClipTypes(Array.isArray(data.selectedClipTypes) ? data.selectedClipTypes : ["Gold Zone Entries"]);
+        setSelectedClipTypes(Array.isArray(data.selectedClipTypes) ? data.selectedClipTypes : defaultReviewClipTypes);
         setGeneratedClips([]);
+        setCompilationOutputs([]);
         notify("Project Opened", `${file.name} loaded successfully.`, "success");
       } catch (error) {
         notify("Open Failed", "This .ras file could not be opened.", "error");
@@ -1323,7 +1400,10 @@ export default function App() {
     const title = matchTitle === "No Match Loaded" ? "Match Analysis" : matchTitle;
     const videoReviewLinks = compilationOutputs.map((outputPath) => {
       const fileName = outputPath.split(/[\\/]/).pop() || outputPath;
-      const label = fileName.replace(/-compilation\.mp4$/i, "").replace(/-/g, " ");
+      const label = fileName
+        .replace(/-(?:quick|coach|deep|\d+s-before-\d+s-after)-compilation\.mp4$/i, "")
+        .replace(/-compilation\.mp4$/i, "")
+        .replace(/-/g, " ");
       const url = coachPackage ? `Video%20Clips/${encodeURIComponent(fileName)}` : encodeURI(`file:///${outputPath.replace(/\\/g, "/")}`);
       return { label: titleCase(label), fileName, url };
     });
@@ -1356,16 +1436,12 @@ export default function App() {
       || event.outcome === "Penalty Conceded"
       || (event.outcome === "Ball Lost" && event.reason === "Penalty Conceded"),
     );
-    const penaltyWonEvents = events.filter((event) => event.event === "Penalty Won" || event.outcome === "Penalty Won");
     const zoneEvidence = pitchZones.map((zone) => {
       const zoneEvents = events.filter((event) => event.zone === zone);
       return {
         zone,
         total: zoneEvents.length,
-        attacks: zoneEvents.filter((event) => event.category === "attack").length,
-        ballLosses: zoneEvents.filter((event) => event.outcome === "Ball Lost").length,
         penaltiesConceded: penaltyConcededEvents.filter((event) => event.zone === zone).length,
-        penaltiesWon: penaltyWonEvents.filter((event) => event.zone === zone).length,
       };
     });
     const penaltyByReason = penaltyConcededEvents.reduce<Record<string, number>>((summary, event) => {
@@ -1374,6 +1450,7 @@ export default function App() {
       return summary;
     }, {});
     const penaltyHotspot = [...zoneEvidence].sort((a, b) => b.penaltiesConceded - a.penaltiesConceded)[0];
+    const eventHotspot = [...zoneEvidence].sort((a, b) => b.total - a.total)[0];
 
     const attackEfficiencyValue = Number(percent(successfulAttacks, totalAttacks));
     const ballLossRateValue = Number(percent(ballLosses, totalAttacks));
@@ -1385,77 +1462,114 @@ export default function App() {
     const gainlineValue = gainlineSuccess;
     const quickBallValue = quickBallRate;
 
-    const coachTargets = [
-      { label: "Attack Efficiency", value: attackEfficiencyValue, display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%+", meets: attackEfficiencyValue >= 45 || totalAttacks === 0 },
-      { label: "Gainline Success", value: gainlineValue, display: `${gainlineValue.toFixed(1)}%`, target: "65%+", meets: gainlineValue >= 65 || allAttackPhases.length === 0 },
-      { label: "Quick Ball", value: quickBallValue, display: `${quickBallValue.toFixed(1)}%`, target: "55%+", meets: quickBallValue >= 55 || allAttackPhases.length === 0 },
-      { label: "Ball Loss Rate", value: ballLossRateValue, display: `${ballLossRateValue.toFixed(1)}%`, target: "Under 18%", meets: ballLossRateValue <= 18 || totalAttacks === 0 },
-      { label: "Gold Zone Conversion", value: goldZoneValue, display: `${goldZoneValue.toFixed(1)}%`, target: "60%+", meets: goldZoneValue >= 60 || goldZoneEntries.length === 0 },
-      { label: "Tackle Completion", value: tackleCompletionValue, display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%+", meets: tackleCompletionValue >= 88 || (tackleMade + tackleMissed) === 0 },
-      { label: "Lineout Success", value: lineoutValue, display: `${lineoutValue.toFixed(1)}%`, target: "85%+", meets: lineoutValue >= 85 || totalLineouts === 0 },
-      { label: "Scrum Success", value: scrumValue, display: `${scrumValue.toFixed(1)}%`, target: "90%+", meets: scrumValue >= 90 || totalScrums === 0 },
-      { label: "Exit Success", value: exitValue, display: `${exitValue.toFixed(1)}%`, target: "80%+", meets: exitValue >= 80 || exitKicks.length === 0 },
-    ];
-
     const performanceRankings = [
-      { label: "Attack Efficiency", display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%", score: attackEfficiencyValue - 45, enough: totalAttacks >= 3 },
-      { label: "Ball Security", display: `${ballLossRateValue.toFixed(1)}% ball loss rate`, target: "below 18%", score: 18 - ballLossRateValue, enough: totalAttacks >= 3 },
-      { label: "Gold Zone Conversion", display: `${goldZoneValue.toFixed(1)}% (${successfulGoldZoneEntries.length} from ${goldZoneEntries.length})`, target: "60%", score: goldZoneValue - 60, enough: goldZoneEntries.length >= 2 },
-      { label: "Gainline Performance", display: `${gainlineValue.toFixed(1)}%`, target: "65%", score: gainlineValue - 65, enough: allAttackPhases.length >= 5 },
-      { label: "Ruck Speed", display: `${quickBallValue.toFixed(1)}% quick ball`, target: "55%", score: quickBallValue - 55, enough: allAttackPhases.length >= 5 },
-      { label: "Tackle Completion", display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%", score: tackleCompletionValue - 88, enough: tackleMade + tackleMissed >= 5 },
-      { label: "Lineout Success", display: `${lineoutValue.toFixed(1)}%`, target: "85%", score: lineoutValue - 85, enough: totalLineouts >= 3 },
-      { label: "Scrum Success", display: `${scrumValue.toFixed(1)}%`, target: "90%", score: scrumValue - 90, enough: totalScrums >= 3 },
-      { label: "Exit Execution", display: `${exitValue.toFixed(1)}%`, target: "80%", score: exitValue - 80, enough: exitKicks.length >= 2 },
+      { label: "Try Differential", display: `${triesScored} scored / ${triesConceded} conceded`, target: "a level or positive try differential", score: (triesScored - triesConceded) * 10, priority: 100, enough: triesScored + triesConceded > 0 },
+      { label: "Attack Efficiency", display: `${attackEfficiencyValue.toFixed(1)}%`, target: "45%", score: attackEfficiencyValue - 45, priority: 95, enough: totalAttacks >= 3 },
+      { label: "Gold Zone Conversion", display: `${goldZoneValue.toFixed(1)}% (${successfulGoldZoneEntries.length} from ${goldZoneEntries.length})`, target: "60%", score: goldZoneValue - 60, priority: 90, enough: goldZoneEntries.length >= 2 },
+      { label: "Discipline", display: `${penaltyConcededEvents.length} penalties conceded`, target: "10 or fewer", score: 10 - penaltyConcededEvents.length, priority: 88, enough: events.length >= 10 || penaltyConcededEvents.length > 0 },
+      { label: "Ball Security", display: `${ballLossRateValue.toFixed(1)}% ball loss rate`, target: "below 18%", score: 18 - ballLossRateValue, priority: 86, enough: totalAttacks >= 3 },
+      { label: "Territory Control", display: `${territoryValue.toFixed(1)}% in the opposition half`, target: "50%", score: territoryValue - 50, priority: 82, enough: matchInsights.segments.length >= 4 },
+      { label: "Possession Control", display: `${possessionValue.toFixed(1)}% estimated possession`, target: "50%", score: possessionValue - 50, priority: 78, enough: matchInsights.segments.length >= 4 },
+      { label: "Tackle Completion", display: `${tackleCompletionValue.toFixed(1)}%`, target: "88%", score: tackleCompletionValue - 88, priority: 76, enough: tackleMade + tackleMissed >= 5 },
+      { label: "Gainline Performance", display: `${gainlineValue.toFixed(1)}%`, target: "65%", score: gainlineValue - 65, priority: 70, enough: allAttackPhases.length >= 5 },
+      { label: "Ruck Speed", display: `${quickBallValue.toFixed(1)}% quick ball`, target: "55%", score: quickBallValue - 55, priority: 68, enough: allAttackPhases.length >= 5 },
+      { label: "Lineout Success", display: `${lineoutValue.toFixed(1)}%`, target: "85%", score: lineoutValue - 85, priority: 64, enough: totalLineouts >= 3 },
+      { label: "Scrum Success", display: `${scrumValue.toFixed(1)}%`, target: "90%", score: scrumValue - 90, priority: 62, enough: totalScrums >= 3 },
+      { label: "Exit Execution", display: `${exitValue.toFixed(1)}%`, target: "80%", score: exitValue - 80, priority: 55, enough: exitKicks.length >= 2 },
     ].filter((metric) => metric.enough);
 
-    const allMatchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.score - a.score);
-    const allMatchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => a.score - b.score);
-    const possibleCauses: Record<string, string> = {
-      "Attack Efficiency": "attack shape clarity, decision-making at the defensive line, phase continuity and the quality of possession starts",
-      "Ball Security": "handling under pressure, carrier isolation, breakdown support and forced passes",
-      "Gold Zone Conversion": "patience, role clarity, option quality and decision-making close to the try line",
-      "Gainline Performance": "carrier momentum, receiving depth, footwork before contact and support-line timing",
-      "Ruck Speed": "ball presentation, first-arriver urgency, cleanout accuracy and carrier support",
-      "Tackle Completion": "defensive connection, spacing, tackle technique and fatigue-related decision-making",
-      "Lineout Success": "throw accuracy, timing, movement disguise and pressure on the lifting unit",
-      "Scrum Success": "engagement accuracy, collective shape, pressure management and exit decisions",
-      "Exit Execution": "kick selection, chase connection, field awareness and pressure before the kick",
-    };
+    const allMatchStrengths = performanceRankings.filter((metric) => metric.score >= 0).sort((a, b) => b.priority - a.priority);
+    const allMatchWorkOns = performanceRankings.filter((metric) => metric.score < 0).sort((a, b) => b.priority - a.priority);
+    const summariseCounts = (summary: Record<string, number>, limit = 3) => Object.entries(summary)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, limit)
+      .map(([label, count]) => `${label} (${count})`)
+      .join(", ");
+    const goldZoneFailureBreakdown = goldZoneEntries
+      .filter((event) => !goldZoneSuccessOutcomes.includes(event.goldZoneOutcome || event.outcome || ""))
+      .reduce<Record<string, number>>((summary, event) => {
+        const outcome = event.goldZoneOutcome || event.outcome || "No successful outcome logged";
+        summary[outcome] = (summary[outcome] || 0) + 1;
+        return summary;
+      }, {});
+    const missedTackleZones = defenceEvents
+      .filter((event) => event.event === "Tackle Missed")
+      .reduce<Record<string, number>>((summary, event) => {
+        summary[event.zone] = (summary[event.zone] || 0) + 1;
+        return summary;
+      }, {});
+    const exitFailureBreakdown = exitKicks
+      .filter((event) => !["Successful Exit", "Good Exit"].includes(event.outcome || ""))
+      .reduce<Record<string, number>>((summary, event) => {
+        const outcome = event.outcome || "Unclassified exit";
+        summary[outcome] = (summary[outcome] || 0) + 1;
+        return summary;
+      }, {});
+    const gainlineNeutral = allAttackPhases.filter((phase) => phase.gainline === "Neutral").length;
+    const gainlineLost = allAttackPhases.filter((phase) => phase.gainline === "Lost").length;
+    const averageRucks = allAttackPhases.filter((phase) => phase.ruckSpeed === "Average").length;
+    const slowRucks = allAttackPhases.filter((phase) => phase.ruckSpeed === "Slow").length;
+
+    function contributingFactorExplanation(label: string) {
+      if (label === "Attack Efficiency") {
+        const reasons = summariseCounts(ballLostReasonBreakdown);
+        return `${successfulAttacks} of ${totalAttacks} attacks produced a successful outcome, while ${ballLosses} ended in ball loss.${reasons ? ` The most common logged loss reasons were ${reasons}.` : ""} The evidence therefore points to possession ending before attacks could create a return; review those loss sequences for the decision or execution error immediately before possession changed.`;
+      }
+      if (label === "Gold Zone Conversion") {
+        const failedEntries = Math.max(0, goldZoneEntries.length - successfulGoldZoneEntries.length);
+        const endings = summariseCounts(goldZoneFailureBreakdown);
+        return `${failedEntries} of ${goldZoneEntries.length} Gold Zone entries failed to produce points.${endings ? ` Their most common logged endings were ${endings}.` : ""} This suggests the main cost occurred after entering the opposition 22, when pressure was not converted; use those entry clips to identify whether possession was lost through handling, breakdown, set-piece or decision-making errors.`;
+      }
+      if (label === "Discipline") {
+        const reasons = summariseCounts(penaltyByReason);
+        return `${penaltyConcededEvents.length} penalties were conceded, with ${penaltyHotspot?.penaltiesConceded || 0} occurring in ${penaltyHotspot?.zone || "the main hotspot"}.${reasons ? ` The leading logged causes were ${reasons}.` : ""} The concentration and reason mix identify where repeated pressure was being released; validate whether these came from breakdown technique, spacing or set-piece pressure in the matching clips.`;
+      }
+      if (label === "Ball Security") {
+        const reasons = summariseCounts(ballLostReasonBreakdown);
+        return `${ballLosses} of ${totalAttacks} attacks ended in ball loss (${ballLossRateValue.toFixed(1)}%).${reasons ? ` The leading logged causes were ${reasons}.` : ""} Because the losses are classified, the review should focus first on the highest-frequency cause rather than treating every turnover as the same problem.`;
+      }
+      if (label === "Territory Control") {
+        const exitFailures = Math.max(0, exitKicks.length - goodExits);
+        const exits = summariseCounts(exitFailureBreakdown);
+        return `Only ${territoryValue.toFixed(1)}% of the time-weighted match was played in the opposition half. Exit kicks succeeded ${goodExits} times from ${exitKicks.length}, with ${exitFailures} unsuccessful exits${exits ? ` (${exits})` : ""}, while ${ballLosses} attacks ended in lost possession. The combined evidence suggests territory was being surrendered through exit execution and possession losses before pressure could be sustained.`;
+      }
+      if (label === "Possession Control") {
+        return `Estimated possession was ${possessionValue.toFixed(1)}%. The team recorded ${ballLosses} attacking ball losses, ${lineoutsLost} lost lineouts and ${scrumsLost} lost scrums. These logged possession changes provide the clearest explanation for why the possession share stayed below the reference; review the largest loss category first.`;
+      }
+      if (label === "Tackle Completion") {
+        const zones = summariseCounts(missedTackleZones);
+        return `${tackleMissed} of ${tackleMade + tackleMissed} tackle attempts were missed (${tackleCompletionValue.toFixed(1)}% completed).${zones ? ` Misses were concentrated in ${zones}.` : ""} That location pattern should be used to test whether the repeated cause was defensive spacing, connection or individual tackle execution.`;
+      }
+      if (label === "Gainline Performance") {
+        return `${gainlineWon} of ${allAttackPhases.length} classified carries won the gainline; ${gainlineNeutral} were neutral and ${gainlineLost} lost ground. The balance shows how often phase momentum stalled before the next ruck, so the relevant clips should be checked for receiving depth, carrier footwork and support timing.`;
+      }
+      if (label === "Ruck Speed") {
+        return `${quickRucks} of ${allAttackPhases.length} classified rucks produced quick ball, compared with ${averageRucks} average and ${slowRucks} slow rucks. The non-quick ruck volume explains the reduced attacking tempo; review ball presentation and first-arriver support on those phases.`;
+      }
+      if (label === "Lineout Success") {
+        return `${lineoutsLost} of ${totalLineouts} lineouts were lost, leaving ${lineoutsWon} retained (${lineoutValue.toFixed(1)}%). With half of the available launch possession removed in this sample, the lost-lineout clips should be compared for repeat patterns in throw location, timing, movement or lifting pressure.`;
+      }
+      if (label === "Scrum Success") {
+        return `${scrumsLost} of ${totalScrums} scrums were lost and ${scrumsWon} were retained (${scrumValue.toFixed(1)}%). Review the lost outcomes together to determine whether the repeat pattern occurred at engagement, under sustained pressure or during the exit.`;
+      }
+      if (label === "Exit Execution") {
+        const failures = Math.max(0, exitKicks.length - goodExits);
+        const exits = summariseCounts(exitFailureBreakdown);
+        return `${goodExits} of ${exitKicks.length} exits were successful, leaving ${failures} unsuccessful.${exits ? ` Those failures were logged as ${exits}.` : ""} This points the review toward the kick decision, pressure before contact and chase connection on the failed exits.`;
+      }
+      if (label === "Try Differential") {
+        return `The team scored ${triesScored} tries and conceded ${triesConceded}. Review the scoring and conceded sequences beside the Gold Zone and tackle data to identify whether the differential was driven primarily by conversion of entries or defensive breakdowns.`;
+      }
+      return `This metric fell below its reference in the logged sample. Review its corresponding events alongside the score and match situation to establish the repeatable cause.`;
+    }
     const hasRecordedScore = teamScore !== "" && oppositionScore !== "";
     const teamScoreValue = Number(teamScore);
     const oppositionScoreValue = Number(oppositionScore);
     const resultType = !hasRecordedScore ? "unrecorded" : teamScoreValue > oppositionScoreValue ? "win" : teamScoreValue < oppositionScoreValue ? "loss" : "draw";
-    // Lead with the evidence that best explains the recorded result, without hiding
-    // the strongest counter-signals. A win receives the full positive picture; a
-    // loss receives the full development picture.
-    const matchStrengths = resultType === "loss" ? allMatchStrengths.slice(0, 3) : allMatchStrengths;
-    const matchWorkOns = resultType === "win" ? allMatchWorkOns.slice(0, 3) : allMatchWorkOns;
-
-    const coachSummary: string[] = [];
-    const knockOns = ballLostReasonBreakdown["Knock-on"] || 0;
-    const intercepts = ballLostReasonBreakdown["Intercept"] || 0;
-    const takenIntoTouch = ballLostReasonBreakdown["Taken Into Touch"] || 0;
-    const turnovers = ballLostReasonBreakdown["Turnover"] || 0;
-    const forwardPasses = ballLostReasonBreakdown["Forward Pass"] || 0;
-    const penaltiesLost = ballLostReasonBreakdown["Penalty Conceded"] || 0;
-
-    if (attackEfficiencyValue >= 45 && totalAttacks > 0) coachSummary.push("Attack efficiency met the recommended target. Review clips to identify which shapes created the cleanest outcomes.");
-    if (gainlineValue >= 65 && allAttackPhases.length > 0) coachSummary.push("The team consistently won the gainline, creating a strong platform for the next phase.");
-    if (gainlineValue < 65 && allAttackPhases.length > 0) coachSummary.push("Gainline success was below target. Review carrier footwork, body height and whether runners received the ball with enough momentum.");
-    if (quickBallValue < 55 && allAttackPhases.length > 0) coachSummary.push("Quick ball was below target. Prioritise first-arriver speed, cleaner presentation and more decisive breakdown support.");
-    if (gainlineValue >= 65 && quickBallValue < 55 && allAttackPhases.length > 0) coachSummary.push("Strong gainline outcomes were not consistently converted into quick ball; improving support arrival should unlock more attacking momentum.");
-    if (ballLossRateValue <= 18 && totalAttacks > 0) coachSummary.push("Ball security was within the target range. Keep reinforcing support depth and clear decision-making.");
-    if (knockOns > 0) coachSummary.push(`${knockOns} knock-on(s): review carry height, contact skill, pass timing and catch quality under pressure.`);
-    if (intercepts > 0) coachSummary.push(`${intercepts} intercept(s): check whether the pass was forced, whether the receiver was flat, and whether the defender was fixed before release.`);
-    if (takenIntoTouch > 0) coachSummary.push(`${takenIntoTouch} taken into touch: review edge spacing, touchline awareness, support angle and whether the carrier had an inside option.`);
-    if (turnovers > 0) coachSummary.push(`${turnovers} turnover(s): review cleanout arrival, support depth and whether the ball carrier became isolated.`);
-    if (forwardPasses > 0) coachSummary.push(`${forwardPasses} forward pass(es): review running lines and whether the passer is drifting before release.`);
-    if (penaltiesLost > 0) coachSummary.push(`${penaltiesLost} penalty loss(es): review decision-making at the breakdown and whether support players are arriving legally.`);
-    if (ballLossRateValue > 18 && totalAttacks > 0) coachSummary.push("Ball loss rate is above the recommended target. Prioritise possession security before adding more attacking complexity.");
-    if (goldZoneValue < 60 && goldZoneEntries.length > 0) coachSummary.push("Gold zone conversion is below target. Review shape clarity, patience, and whether the attack is creating two genuine scoring options.");
-    if (triesConceded > 0) coachSummary.push(`${triesConceded} try/tries conceded: clip these moments and review defensive connection immediately after possession changes.`);
-    if (!coachSummary.length) coachSummary.push("No major red flags from the logged data. Use clips to confirm the tactical picture and validate the statistics.");
+    // Keep every statistically supported signal. Result controls the reading order,
+    // but never hides positives or development areas from the customer.
+    const matchStrengths = allMatchStrengths;
+    const matchWorkOns = allMatchWorkOns;
 
     function ensureSpace(space = 12) {
       if (y + space > pageHeight - 18) {
@@ -1471,7 +1585,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.8", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.3.9", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -1500,6 +1614,35 @@ export default function App() {
       y += 7;
     }
 
+    function clipFor(statType: string) {
+      const normalise = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (!defaultReviewClipTypes.some((type) => normalise(type) === normalise(statType))) return undefined;
+      return videoReviewLinks.find((video) => normalise(video.label) === normalise(statType));
+    }
+
+    function addLineWithClip(label: string, value: string | number, clipType: string) {
+      const clip = clipFor(clipType);
+      ensureSpace(9);
+      doc.setFontSize(9.5);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(51, 65, 85);
+      doc.text(label, margin, y);
+      doc.setFont("helvetica", "bold");
+      doc.setTextColor(15, 23, 42);
+      doc.text(String(value), pageWidth - margin - (clip ? 34 : 0), y, { align: "right" });
+      if (clip) {
+        const buttonX = pageWidth - margin - 30;
+        doc.setFillColor(6, 17, 10);
+        doc.setDrawColor(126, 217, 87);
+        doc.roundedRect(buttonX, y - 5, 30, 7, 1.7, 1.7, "FD");
+        doc.setTextColor(126, 217, 87);
+        doc.setFontSize(6.8);
+        doc.text("PLAY CLIP", buttonX + 15, y - .4, { align: "center" });
+        doc.link(buttonX, y - 5, 30, 7, { url: clip.url });
+      }
+      y += 7;
+    }
+
     function addParagraph(text: string) {
       const lines = doc.splitTextToSize(text, pageWidth - margin * 2 - 4);
       ensureSpace(lines.length * 5 + 4);
@@ -1508,6 +1651,29 @@ export default function App() {
       doc.setTextColor(51, 65, 85);
       doc.text(lines, margin + 2, y);
       y += lines.length * 5 + 4;
+    }
+
+    function addContributingFactor(index: number, label: string, detail: string) {
+      const lines = doc.splitTextToSize(detail, pageWidth - margin * 2 - 25);
+      const cardHeight = Math.max(19, 12 + lines.length * 4.5);
+      ensureSpace(cardHeight + 4);
+      doc.setFillColor(255, 247, 245);
+      doc.setDrawColor(239, 68, 68);
+      doc.roundedRect(margin, y - 5, pageWidth - margin * 2, cardHeight, 3, 3, "FD");
+      doc.setFillColor(239, 68, 68);
+      doc.circle(margin + 8, y + 5, 4.5, "F");
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(8.5);
+      doc.text(String(index), margin + 8, y + 6.1, { align: "center" });
+      doc.setTextColor(15, 23, 42);
+      doc.setFontSize(9.5);
+      doc.text(`TAKEAWAY ${index} - ${label.toUpperCase()}`, margin + 16, y + 2);
+      doc.setTextColor(71, 85, 105);
+      doc.setFont("helvetica", "normal");
+      doc.setFontSize(8.3);
+      doc.text(lines, margin + 16, y + 7);
+      y += cardHeight + 4;
     }
 
     function addShareBar(label: string, primaryLabel: string, primaryValue: number, secondaryLabel: string, secondaryValue: number) {
@@ -1528,34 +1694,6 @@ export default function App() {
         doc.roundedRect(margin, y + 8, Math.max(2, width * Math.min(100, primaryValue) / 100), 5, 2.5, 2.5, "F");
       }
       y += 19;
-    }
-
-    function addTargetLine(target: typeof coachTargets[number]) {
-      ensureSpace(9);
-      doc.setFontSize(9.5);
-      doc.setFont("helvetica", "normal");
-      doc.setTextColor(51, 65, 85);
-      doc.text(target.label, margin, y);
-      doc.setFont("helvetica", "bold");
-      doc.setTextColor(target.meets ? 34 : 220, target.meets ? 139 : 38, target.meets ? 34 : 38);
-      doc.text(target.display, pageWidth - margin - 38, y, { align: "right" });
-      doc.setTextColor(100, 116, 139);
-      doc.text(target.target, pageWidth - margin, y, { align: "right" });
-      y += 7;
-    }
-
-    function addKpiCard(x: number, label: string, value: string, meets: boolean) {
-      doc.setFillColor(248, 250, 252);
-      doc.setDrawColor(226, 232, 240);
-      doc.roundedRect(x, y, 42, 22, 3, 3, "FD");
-      doc.setFont("helvetica", "normal");
-      doc.setFontSize(7.3);
-      doc.setTextColor(100, 116, 139);
-      doc.text(label.toUpperCase(), x + 3, y + 6);
-      doc.setFont("helvetica", "bold");
-      doc.setFontSize(13);
-      doc.setTextColor(meets ? 34 : 220, meets ? 139 : 38, meets ? 34 : 38);
-      doc.text(value, x + 3, y + 16);
     }
 
     function addInsightCard(index: number, heading: string, detail: string, tone: "risk" | "positive") {
@@ -1636,65 +1774,210 @@ export default function App() {
       y += height + 12;
     }
 
+    function addPenaltyHeatmap() {
+      ensureSpace(52);
+      const mapX = margin;
+      const mapWidth = pageWidth - margin * 2;
+      const mapHeight = 34;
+      const zoneWidth = mapWidth / 5;
+      const orderedZones = [...zoneEvidence].reverse();
+      const maximum = Math.max(1, ...orderedZones.map((zone) => zone.penaltiesConceded));
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6.8);
+      doc.setTextColor(100, 116, 139);
+      doc.text("OWN TRY LINE", mapX, y);
+      doc.text("ATTACKING DIRECTION  >", mapX + mapWidth / 2, y, { align: "center" });
+      doc.text("OPPOSITION TRY LINE", mapX + mapWidth, y, { align: "right" });
+      y += 4;
+      doc.setFillColor(29, 77, 49);
+      doc.setDrawColor(176, 190, 181);
+      doc.roundedRect(mapX, y, mapWidth, mapHeight, 2, 2, "FD");
+      orderedZones.forEach((zone, index) => {
+        const intensity = zone.penaltiesConceded / maximum;
+        const red = Math.round(48 + intensity * 199);
+        const green = Math.round(111 - intensity * 55);
+        const blue = Math.round(61 - intensity * 34);
+        const zoneX = mapX + index * zoneWidth;
+        doc.setFillColor(red, green, blue);
+        doc.rect(zoneX, y, zoneWidth, mapHeight, "F");
+        if (index) {
+          doc.setDrawColor(240, 245, 242);
+          doc.setLineWidth(.25);
+          doc.line(zoneX, y, zoneX, y + mapHeight);
+        }
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7.2);
+        doc.text(zone.zone.toUpperCase(), zoneX + zoneWidth / 2, y + 11, { align: "center" });
+        doc.setFontSize(16);
+        doc.text(String(zone.penaltiesConceded), zoneX + zoneWidth / 2, y + 23, { align: "center" });
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(6.2);
+        doc.text(zone.penaltiesConceded === 1 ? "PENALTY" : "PENALTIES", zoneX + zoneWidth / 2, y + 29, { align: "center" });
+      });
+      doc.setDrawColor(255, 255, 255);
+      doc.setLineWidth(.4);
+      doc.line(mapX + mapWidth / 2, y, mapX + mapWidth / 2, y + mapHeight);
+      y += mapHeight + 8;
+    }
+
+    function addEventHeatmap() {
+      ensureSpace(52);
+      const mapX = margin;
+      const mapWidth = pageWidth - margin * 2;
+      const mapHeight = 34;
+      const zoneWidth = mapWidth / 5;
+      const orderedZones = [...zoneEvidence].reverse();
+      const maximum = Math.max(1, ...orderedZones.map((zone) => zone.total));
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(6.8);
+      doc.setTextColor(100, 116, 139);
+      doc.text("OWN TRY LINE", mapX, y);
+      doc.text("ATTACKING DIRECTION  >", mapX + mapWidth / 2, y, { align: "center" });
+      doc.text("OPPOSITION TRY LINE", mapX + mapWidth, y, { align: "right" });
+      y += 4;
+      doc.setFillColor(20, 59, 41);
+      doc.setDrawColor(176, 190, 181);
+      doc.roundedRect(mapX, y, mapWidth, mapHeight, 2, 2, "FD");
+      orderedZones.forEach((zone, index) => {
+        const intensity = zone.total / maximum;
+        const red = Math.round(25 + intensity * 101);
+        const green = Math.round(74 + intensity * 143);
+        const blue = Math.round(47 + intensity * 40);
+        const zoneX = mapX + index * zoneWidth;
+        doc.setFillColor(red, green, blue);
+        doc.rect(zoneX, y, zoneWidth, mapHeight, "F");
+        if (index) {
+          doc.setDrawColor(240, 245, 242);
+          doc.setLineWidth(.25);
+          doc.line(zoneX, y, zoneX, y + mapHeight);
+        }
+        doc.setTextColor(intensity > .58 ? 5 : 255, intensity > .58 ? 18 : 255, intensity > .58 ? 10 : 255);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7.2);
+        doc.text(zone.zone.toUpperCase(), zoneX + zoneWidth / 2, y + 11, { align: "center" });
+        doc.setFontSize(16);
+        doc.text(String(zone.total), zoneX + zoneWidth / 2, y + 23, { align: "center" });
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(6.2);
+        doc.text(zone.total === 1 ? "EVENT" : "EVENTS", zoneX + zoneWidth / 2, y + 29, { align: "center" });
+      });
+      doc.setDrawColor(255, 255, 255);
+      doc.setLineWidth(.4);
+      doc.line(mapX + mapWidth / 2, y, mapX + mapWidth / 2, y + mapHeight);
+      y += mapHeight + 8;
+    }
+
     const logoImage = document.querySelector<HTMLImageElement>(".logo-wrap img");
 
-    // Premium cover page — the uploaded team's logo drives the visual identity.
+    // Premium cover page - the uploaded team's logo and palette drive the identity.
+    const coverLight = mixColour(coverPalette.dark, [255, 255, 255], .07);
+    const coverLine = mixColour(coverPalette.secondary, [255, 255, 255], .18);
     doc.setFillColor(...coverPalette.dark);
     doc.rect(0, 0, pageWidth, pageHeight, "F");
-    doc.setFillColor(...coverPalette.panel);
-    doc.rect(0, 0, pageWidth, 47, "F");
-    doc.setFillColor(...mixColour(coverPalette.panel, [255, 255, 255], .08));
-    doc.rect(0, pageHeight - 42, pageWidth, 42, "F");
+    doc.setFillColor(...coverLight);
+    doc.rect(0, 0, pageWidth, 72, "F");
+    doc.setFillColor(...mixColour(coverPalette.panel, coverPalette.dark, .25));
+    doc.triangle(0, 67, pageWidth * .62, 0, 0, 0, "F");
+    doc.setFillColor(...mixColour(coverPalette.panel, coverPalette.accent, .12));
+    doc.triangle(pageWidth, 37, pageWidth, 0, pageWidth * .7, 0, "F");
     doc.setFillColor(...coverPalette.accent);
     doc.rect(0, 0, pageWidth, 3.5, "F");
-    doc.rect(pageWidth - 3.5, 0, 3.5, pageHeight, "F");
-    doc.setDrawColor(...coverPalette.secondary);
-    doc.setLineWidth(.35);
-    doc.roundedRect(10, 10, pageWidth - 20, pageHeight - 20, 4, 4, "S");
-    doc.setDrawColor(...coverPalette.accent);
-    doc.line(margin, 92, pageWidth - margin, 92);
+
+    doc.setDrawColor(...mixColour(coverLine, coverPalette.dark, .55));
+    doc.setLineWidth(.22);
+    for (let pitchX = 16; pitchX <= pageWidth - 16; pitchX += (pageWidth - 32) / 6) doc.line(pitchX, 76, pitchX, pageHeight - 16);
+    doc.line(16, 76, pageWidth - 16, 76);
+    doc.line(16, pageHeight - 16, pageWidth - 16, pageHeight - 16);
+    doc.line(pageWidth / 2, 76, pageWidth / 2, pageHeight - 16);
+    doc.circle(pageWidth / 2, 188, 23, "S");
+    doc.setDrawColor(...coverLine);
+    doc.setLineWidth(.45);
+    doc.roundedRect(10, 10, pageWidth - 20, pageHeight - 20, 5, 5, "S");
+
+    try { if (logoImage && logoImage.complete && logoImage.naturalWidth > 0) doc.addImage(logoImage, "PNG", pageWidth / 2 - 14, 12, 28, 28, undefined, "FAST"); } catch (_) {}
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(11.5);
-    doc.text("RUGBY ANALYSIS SUITE", pageWidth / 2, 17, { align: "center" });
+    doc.setFontSize(12.5);
+    doc.text("RUGBY ANALYSIS SUITE", pageWidth / 2, 49, { align: "center" });
+    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .34));
+    doc.setFontSize(7.5);
+    doc.text("PERFORMANCE INTELLIGENCE  /  MATCH REPORTING", pageWidth / 2, 57, { align: "center" });
     doc.setFillColor(...coverPalette.accent);
-    doc.roundedRect(pageWidth / 2 - 20, 21, 40, 1.2, .6, .6, "F");
-    try { if (logoImage && logoImage.complete && logoImage.naturalWidth > 0) doc.addImage(logoImage, "PNG", pageWidth / 2 - 25, 25, 50, 50, undefined, "FAST"); } catch (_) {}
-    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .25));
-    doc.setFontSize(8.5);
-    doc.text("STATISTICAL MATCH EVALUATION", pageWidth / 2, 86, { align: "center" });
+    doc.roundedRect(pageWidth / 2 - 22, 63, 44, 1.4, .7, .7, "F");
 
-    doc.setFillColor(...mixColour(coverPalette.dark, coverPalette.accent, .09));
-    doc.setDrawColor(...mixColour(coverPalette.accent, coverPalette.secondary, .45));
-    doc.roundedRect(margin, 104, pageWidth - margin * 2, 111, 5, 5, "FD");
+    doc.setFillColor(...mixColour(coverPalette.dark, [0, 0, 0], .35));
+    doc.roundedRect(17, 82, pageWidth - 30, 143, 7, 7, "F");
+    doc.setFillColor(...mixColour(coverPalette.panel, coverPalette.dark, .3));
+    doc.setDrawColor(...mixColour(coverPalette.accent, coverPalette.secondary, .4));
+    doc.roundedRect(14, 79, pageWidth - 28, 143, 7, 7, "FD");
+    doc.setFillColor(...coverPalette.accent);
+    doc.roundedRect(14, 79, 3, 143, 1.5, 1.5, "F");
+    doc.roundedRect(pageWidth - 17, 79, 3, 143, 1.5, 1.5, "F");
+
+    doc.setFillColor(247, 249, 248);
+    doc.setDrawColor(...coverPalette.accent);
+    doc.roundedRect(pageWidth / 2 - 22, 88, 44, 44, 6, 6, "FD");
     if (teamLogoDataUrl) {
-      try { doc.addImage(teamLogoDataUrl, teamLogoDataUrl.includes("image/jpeg") ? "JPEG" : "PNG", pageWidth / 2 - 14, 111, 28, 28, undefined, "FAST"); } catch (_) {}
+      try { doc.addImage(teamLogoDataUrl, teamLogoDataUrl.includes("image/jpeg") ? "JPEG" : "PNG", pageWidth / 2 - 17, 93, 34, 34, undefined, "FAST"); } catch (_) {}
+    } else {
+      doc.setTextColor(...coverPalette.dark);
+      doc.setFontSize(8);
+      doc.text("TEAM CREST", pageWidth / 2, 112, { align: "center" });
     }
+
+    doc.setTextColor(...coverPalette.accent);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(7.5);
+    doc.text("STATISTICAL MATCH EVALUATION", pageWidth / 2, 141, { align: "center" });
     doc.setTextColor(255, 255, 255);
-    doc.setFontSize(25);
-    doc.text(matchName || "YOUR TEAM", pageWidth / 2, teamLogoDataUrl ? 151 : 134, { align: "center", maxWidth: pageWidth - margin * 2 - 16 });
-    doc.setTextColor(160, 169, 166);
-    doc.setFontSize(10);
-    doc.text("VS", pageWidth / 2, teamLogoDataUrl ? 162 : 146, { align: "center" });
-    doc.setTextColor(235, 239, 237);
-    doc.setFontSize(19);
-    doc.text(opposition || "OPPOSITION", pageWidth / 2, teamLogoDataUrl ? 174 : 159, { align: "center", maxWidth: pageWidth - margin * 2 - 16 });
+    doc.setFontSize(23);
+    doc.text(matchName || "YOUR TEAM", pageWidth / 2, 156, { align: "center", maxWidth: pageWidth - margin * 2 - 20 });
+    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .35));
+    doc.setFontSize(8.5);
+    doc.text("VERSUS", pageWidth / 2, 167, { align: "center" });
+    doc.setTextColor(242, 246, 243);
+    doc.setFontSize(17.5);
+    doc.text(opposition || "OPPOSITION", pageWidth / 2, 179, { align: "center", maxWidth: pageWidth - margin * 2 - 20 });
+
     if (teamScore !== "" && oppositionScore !== "") {
       doc.setFillColor(...coverPalette.accent);
-      doc.roundedRect(pageWidth / 2 - 30, 184, 60, 18, 3, 3, "F");
+      doc.roundedRect(pageWidth / 2 - 36, 188, 72, 22, 5, 5, "F");
       doc.setTextColor(...coverPalette.scoreText);
-      doc.setFontSize(24);
-      doc.text(`${teamScore}  -  ${oppositionScore}`, pageWidth / 2, 197, { align: "center" });
+      doc.setFontSize(26);
+      doc.text(`${teamScore}  -  ${oppositionScore}`, pageWidth / 2, 203, { align: "center" });
+      doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .35));
+      doc.setFontSize(6.8);
+      doc.text("FINAL SCORE", pageWidth / 2, 216, { align: "center" });
     }
-    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .18));
-    doc.setFontSize(9.5);
-    doc.text((competition || "MATCH REVIEW").toUpperCase(), pageWidth / 2, 229, { align: "center" });
+
+    const metadataY = 234;
+    const metadataWidth = (pageWidth - 36) / 3;
+    const metadata = [
+      ["COMPETITION", (competition || "MATCH REVIEW").toUpperCase()],
+      ["DATE", new Date().toLocaleDateString()],
+      ["EVENTS", `${events.length} TAGGED`],
+    ];
+    metadata.forEach(([label, value], index) => {
+      const metadataX = 14 + index * (metadataWidth + 4);
+      doc.setFillColor(...mixColour(coverPalette.panel, coverPalette.dark, .2));
+      doc.setDrawColor(...mixColour(coverPalette.secondary, coverPalette.dark, .35));
+      doc.roundedRect(metadataX, metadataY, metadataWidth, 25, 3, 3, "FD");
+      doc.setTextColor(...coverPalette.accent);
+      doc.setFontSize(6.5);
+      doc.text(label, metadataX + metadataWidth / 2, metadataY + 8, { align: "center" });
+      doc.setTextColor(245, 248, 246);
+      doc.setFontSize(8.2);
+      doc.text(value, metadataX + metadataWidth / 2, metadataY + 17, { align: "center", maxWidth: metadataWidth - 6 });
+    });
+
+    doc.setTextColor(...mixColour(coverPalette.secondary, [255, 255, 255], .25));
+    doc.setFontSize(7.2);
+    doc.text("EVIDENCE-LED ANALYSIS  /  COACHING CONTEXT REMAINS ESSENTIAL", pageWidth / 2, pageHeight - 22, { align: "center" });
     doc.setTextColor(...coverPalette.accent);
-    doc.setFontSize(8.5);
-    doc.text(new Date().toLocaleDateString(), pageWidth / 2, 237, { align: "center" });
-    doc.setTextColor(210, 216, 214);
-    doc.setFontSize(8);
-    doc.text("Evidence-led analysis  •  Coaching context remains essential", pageWidth / 2, pageHeight - 23, { align: "center" });
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6.5);
+    doc.text("PREPARED WITH RUGBY ANALYSIS SUITE", pageWidth / 2, pageHeight - 15, { align: "center" });
 
     doc.addPage();
     y = 18;
@@ -1737,7 +2020,7 @@ export default function App() {
       ? [...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const })), ...matchStrengths.map((metric) => ({ metric, tone: "positive" as const }))]
       : resultType === "win"
         ? [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))]
-        : [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))].sort((a, b) => Math.abs(b.metric.score) - Math.abs(a.metric.score));
+        : [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))].sort((a, b) => b.metric.priority - a.metric.priority);
     if (takeawayItems.length) {
       takeawayItems.forEach(({ metric, tone }, index) => addInsightCard(
         index + 1,
@@ -1750,37 +2033,123 @@ export default function App() {
     } else {
       addInsightCard(1, "INSUFFICIENT SAMPLE", "The available match sample did not contain enough classified events to establish reliable benchmark comparisons.", "risk");
     }
+    if (hasRecordedScore && resultType === "win") addParagraph(`Statistical result driver: the strongest result-aligned positives were ${matchStrengths.length ? matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") : "not established by the available sample"}. The main costs that remained despite the win were ${matchWorkOns.length ? matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") : "not statistically material in the logged sample"}.`);
+    if (hasRecordedScore && resultType === "loss") addParagraph(`Statistical result driver: the most important measured costs were ${matchWorkOns.length ? matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") : "not established by the available sample"}. The strongest positives retained despite the loss were ${matchStrengths.length ? matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") : "not statistically established"}.`);
+    if (hasRecordedScore && resultType === "draw") addParagraph(`Statistical result driver: the positive indicators (${matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") || "none established"}) were offset by the main measured costs (${matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") || "none established"}).`);
 
-    addSection("MATCH SNAPSHOT");
-    ensureSpace(28);
-    const kpiY = y;
-    addKpiCard(margin, "Attack Eff.", `${attackEfficiencyValue.toFixed(1)}%`, attackEfficiencyValue >= 45 || totalAttacks === 0);
-    addKpiCard(margin + 46, "Gainline", `${gainlineValue.toFixed(1)}%`, gainlineValue >= 65 || allAttackPhases.length === 0);
-    addKpiCard(margin + 92, "Quick Ball", `${quickBallValue.toFixed(1)}%`, quickBallValue >= 55 || allAttackPhases.length === 0);
-    addKpiCard(margin + 138, "Ball Loss", `${ballLossRateValue.toFixed(1)}%`, ballLossRateValue <= 18 || totalAttacks === 0);
-    y = kpiY + 24;
+    addSection("ADDITIONAL CONTRIBUTING FACTORS");
+    if (matchWorkOns.length) {
+      matchWorkOns.forEach((metric) => {
+        const takeawayNumber = takeawayItems.findIndex((item) => item.metric.label === metric.label) + 1;
+        addContributingFactor(
+          takeawayNumber,
+          metric.label,
+          contributingFactorExplanation(metric.label),
+        );
+      });
+    } else {
+      addParagraph("No additional statistically material development factors were identified in the logged sample.");
+    }
+
+    addSection("SET PIECE");
+    addLineWithClip("Lineouts Won", lineoutsWon, "Lineout Won");
+    addLineWithClip("Lineouts Lost", lineoutsLost, "Lineout Lost");
+    addLine("Lineout Success", `${lineoutValue.toFixed(1)}%`);
+    addLineWithClip("Scrums Won", scrumsWon, "Scrum Won");
+    addLineWithClip("Scrums Lost", scrumsLost, "Scrum Lost");
+    addLine("Scrum Success", `${scrumValue.toFixed(1)}%`);
+
+    addSection("KICKING");
+    addLine("Contestable Kicks", contestableKicks.length);
+    addLineWithClip("Kick Regained", kickRegained, "Contestable Kick Regained");
+    addLine("Contestable Kick Effectiveness", `${percent(kickRegained, contestableKicks.length)}%`);
+    addLine("Exit Kicks", exitKicks.length);
+    addLineWithClip("Good Exits", goodExits, "Successful Exit");
+    addLine("Exit Success", `${exitValue.toFixed(1)}%`);
+
+    addSection("SCORING & ATTACK OUTCOMES");
+    addLine("Tries Scored", triesScored);
+    addLineWithClip("Tries Conceded", triesConceded, "Try Conceded");
+    addLine("Try Differential", triesScored - triesConceded);
+    addLine("3-Point Scores Taken", threePointScores);
+    addLine("Total Attacks", totalAttacks);
+    addLine("Successful Attacks", successfulAttacks);
+    addLine("Attack Efficiency", `${attackEfficiencyValue.toFixed(1)}%`);
+
+    addSection("ATTACK TYPE BREAKDOWN");
+    const reportAttackTypes = ["Scrum", "Lineout", "Maul", ...attackTypes];
+    reportAttackTypes.forEach((type) => {
+      const typeAttacks = type === "Scrum"
+        ? attacks.filter((event) => event.launchType === "Scrum" || event.attackType === "Scrum")
+        : type === "Lineout"
+          ? lineoutLaunchEvents
+          : type === "Maul"
+            ? events.filter((event) => event.category === "maul" || event.launchType === "Maul" || event.attackType === "Maul")
+            : attacks.filter((event) => event.attackType === type);
+      const typeSuccessful = typeAttacks.filter(isSuccessfulAttackEvent).length;
+      addLine(type, `${typeAttacks.length} attempts (${typeSuccessful} successful) - ${percent(typeSuccessful, typeAttacks.length)}%`);
+      if (type === "Lineout") {
+        const lineoutStyles = [
+          { label: "Down and Out", count: downAndOutLineoutLaunches, events: lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Down and Out" || event.lineoutLaunch === "Normal") },
+          { label: "Off the Top (OT)", count: offTopLineoutLaunches, events: lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Off the Top") },
+          { label: "Maul", count: lineoutMaulLaunches, events: lineoutLaunchEvents.filter((event) => event.lineoutLaunch === "Maul") },
+        ];
+        lineoutStyles.forEach((style) => addLine(`  ${style.label}`, `${style.count} attempts (${style.events.filter(isSuccessfulAttackEvent).length} successful)`));
+      }
+    });
+    addParagraph("Down and Out, Off the Top (OT), and Maul reconcile to the Lineout total. Lineout mauls are also represented in the overall Maul row so coaches can assess maul productivity separately.");
+
+    addSection("BALL SECURITY & LOSS PROFILE");
+    addLineWithClip("Ball Losses", ballLosses, "Ball Lost");
+    addLine("Ball Loss Rate", `${ballLossRateValue.toFixed(1)}%`);
+    if (Object.keys(ballLostReasonBreakdown).length) {
+      Object.entries(ballLostReasonBreakdown).sort((a, b) => b[1] - a[1]).forEach(([reason, count]) => addLine(reason, count));
+    } else {
+      addLine("Ball Loss Reasons", "None logged");
+    }
+
+    addSection("PHASE PERFORMANCE");
+    addLine("Average Phases Per Attack", average(attacks.map((event) => event.phases || 0)));
+    addLine("Gainline Won", `${gainlineWon} / ${allAttackPhases.length}`);
+    addLine("Gainline Success", `${gainlineValue.toFixed(1)}%`);
+    addLine("Quick Rucks", `${quickRucks} / ${allAttackPhases.length}`);
+    addLine("Quick Ball Rate", `${quickBallValue.toFixed(1)}%`);
+
+    addSection("GOLD ZONE CONVERSION");
+    addLineWithClip("Entries", goldZoneEntries.length, "Gold Zone Entries");
+    addLine("Successful Entries", successfulGoldZoneEntries.length);
+    addLine("Gold Zone Efficiency", `${goldZoneValue.toFixed(1)}%`);
+    addLine("Points Generated", goldZonePoints);
+
+    addSection("DEFENSIVE OUTCOMES");
+    addLineWithClip("Tackles Made", tackleMade, "Tackle Made");
+    addLineWithClip("Tackles Missed", tackleMissed, "Tackle Missed");
+    addLine("Tackle Completion", `${tackleCompletionValue.toFixed(1)}%`);
+    addLineWithClip("Ball Won", ballWon, "Ball Won");
+    addLine("Ball Won - Ripped Ball", rippedBalls);
+    addLine("Ball Won - Opposition Kick", oppKicks);
+    addLineWithClip("Opponent Lineout Stolen", opponentLineoutsStolen, "Opponent Lineout Stolen");
+    addLineWithClip("Opponent Scrum Stolen", opponentScrumsStolen, "Opponent Scrum Stolen");
+
+    addSection("DISCIPLINE - PENALTIES CONCEDED");
+    addLineWithClip("Total Penalties Conceded", penaltyConcededEvents.length, "Penalty Conceded");
+    if (penaltyConcededEvents.length && penaltyHotspot) {
+      addParagraph(`The highest concentration was ${penaltyHotspot.zone}: ${penaltyHotspot.penaltiesConceded} of ${penaltyConcededEvents.length} penalties (${percent(penaltyHotspot.penaltiesConceded, penaltyConcededEvents.length)}%).`);
+      addPenaltyHeatmap();
+      addParagraph("Penalty types recorded");
+      Object.entries(penaltyByReason).sort((a, b) => b[1] - a[1]).forEach(([reason, count]) => addLine(reason, count));
+    } else {
+      addParagraph("No penalties conceded were tagged for this match.");
+    }
 
     addSection("POSSESSION & TERRITORY");
     addShareBar("Estimated possession", matchName || "Team", possessionValue, opposition || "Opposition", oppositionPossessionValue);
     addShareBar("Territory", "Opposition half", territoryValue, "Own half / midfield", ownTerritoryValue);
     addParagraph("Possession and territory are time-weighted estimates derived from the intervals between consecutive tagged events. They become more representative when possession changes and pitch zones are tagged consistently throughout the match.");
 
-    addSection("EVENT LOCATIONS");
-    addParagraph("This customer-facing breakdown shows where tagged events started, highlighting the areas that most influenced the match.");
-    zoneEvidence.forEach((zone) => addLine(
-      zone.zone,
-      `${zone.total} events | ${zone.attacks} attacks | ${zone.ballLosses} ball losses | ${zone.penaltiesConceded} penalties conceded | ${zone.penaltiesWon} won`,
-    ));
-
-    addSection("PENALTY HOTSPOTS");
-    if (penaltyConcededEvents.length && penaltyHotspot) {
-      addParagraph(`The highest concentration of penalties conceded was in ${penaltyHotspot.zone}: ${penaltyHotspot.penaltiesConceded} of ${penaltyConcededEvents.length} recorded penalties (${percent(penaltyHotspot.penaltiesConceded, penaltyConcededEvents.length)}%). Review these moments for repeated technical or decision-making patterns.`);
-      zoneEvidence.filter((zone) => zone.penaltiesConceded > 0).sort((a, b) => b.penaltiesConceded - a.penaltiesConceded).forEach((zone) => addLine(zone.zone, zone.penaltiesConceded));
-      addParagraph("Penalty reasons");
-      Object.entries(penaltyByReason).sort((a, b) => b[1] - a[1]).forEach(([reason, count]) => addLine(reason, count));
-    } else {
-      addParagraph("No penalties conceded were tagged for this match.");
-    }
+    addSection("MATCH EVENT HEATMAP - WHERE THE GAME WAS PLAYED");
+    addParagraph(`${eventHotspot.zone} contained the highest concentration with ${eventHotspot.total} of ${events.length} tagged events (${percent(eventHotspot.total, events.length)}%). The pitch below shows the complete event distribution from own 22 to opposition 22.`);
+    addEventHeatmap();
 
     addSection("MATCH MOMENTUM");
     addParagraph("This trend reflects the cumulative balance of positive and negative logged outcomes. It highlights periods for contextual video review rather than proving causation.");
@@ -1788,93 +2157,11 @@ export default function App() {
 
     addSection("VIDEO REVIEW LIBRARY");
     if (videoReviewLinks.length) {
-      addParagraph("Open the priority compilations below to validate the statistical picture against match footage.");
+      addParagraph("The buttons below open every compilation included in the customer package. Matching PLAY CLIP buttons also appear beside relevant statistics throughout the report.");
       videoReviewLinks.forEach((video) => addVideoButton(video.label, video.fileName, video.url));
     } else {
       addParagraph("No videos are linked yet. Generate the required compilations and export this report again to add clickable review buttons.");
     }
-
-    addSection("DETAILED PERFORMANCE EVIDENCE");
-    addParagraph("The following sections provide the supporting detail behind the verdict, red flags and priority review clips above.");
-
-    addSection("ATTACK");
-    addLine("Total Attacks", totalAttacks);
-    addLine("Successful Attacks", successfulAttacks);
-    addLine("Attack Efficiency", `${attackEfficiencyValue.toFixed(1)}%`);
-    addLine("Ball Losses", ballLosses);
-    addLine("Ball Loss Rate", `${ballLossRateValue.toFixed(1)}%`);
-    addLine("Average Phases Per Attack", average(attacks.map((event) => event.phases || 0)));
-    addLine("Gainline Won", `${gainlineWon} / ${allAttackPhases.length}`);
-    addLine("Gainline Success", `${gainlineValue.toFixed(1)}%`);
-    addLine("Quick Rucks", `${quickRucks} / ${allAttackPhases.length}`);
-    addLine("Quick Ball Rate", `${quickBallValue.toFixed(1)}%`);
-
-    addSection("GOLD ZONE");
-    addLine("Entries", goldZoneEntries.length);
-    addLine("Successful Entries", successfulGoldZoneEntries.length);
-    addLine("Gold Zone Efficiency", `${goldZoneValue.toFixed(1)}%`);
-    addLine("Points Generated", goldZonePoints);
-
-    addSection("DEFENCE");
-    addLine("Tackle Made", tackleMade);
-    addLine("Tackle Missed", tackleMissed);
-    addLine("Tackle Completion", `${tackleCompletionValue.toFixed(1)}%`);
-    addLine("Ball Won", ballWon);
-    addLine("Ball Won - Ripped Ball", rippedBalls);
-    addLine("Ball Won - Opp Kick", oppKicks);
-    addLine("Opponent Lineout Stolen", opponentLineoutsStolen);
-    addLine("Opponent Scrum Stolen", opponentScrumsStolen);
-    addLine("Penalties Conceded", penaltiesConceded);
-    addLine("Tries Conceded", triesConceded);
-
-    addSection("KICKING");
-    addLine("Contestable Kicks", contestableKicks.length);
-    addLine("Kick Regained", kickRegained);
-    addLine("Contestable Kick Effectiveness", `${percent(kickRegained, contestableKicks.length)}%`);
-    addLine("Exit Kicks", exitKicks.length);
-    addLine("Good Exits", goodExits);
-    addLine("Exit Success", `${exitValue.toFixed(1)}%`);
-
-    addSection("SET PIECE");
-    addLine("Lineouts", `${lineoutsWon}W / ${lineoutsLost}L`);
-    addLine("Lineout Success", `${lineoutValue.toFixed(1)}%`);
-    addLine("Scrums", `${scrumsWon}W / ${scrumsLost}L`);
-    addLine("Scrum Success", `${scrumValue.toFixed(1)}%`);
-
-    addSection("BALL LOSS BREAKDOWN");
-    if (Object.keys(ballLostReasonBreakdown).length) {
-      Object.entries(ballLostReasonBreakdown)
-        .sort((a, b) => b[1] - a[1])
-        .forEach(([reason, count]) => addLine(reason, count));
-    } else {
-      addLine("Ball Lost Reasons", "None logged");
-    }
-
-    addSection("ATTACK TYPE BREAKDOWN");
-    attackTypes.forEach((type) => {
-      const typeAttacks = attacks.filter((event) => event.attackType === type);
-      const typeSuccessful = typeAttacks.filter((event) => successfulAttackOutcomes.includes(event.outcome || "")).length;
-      addLine(type, `${typeAttacks.length} attacks | ${typeSuccessful} successful | ${percent(typeSuccessful, typeAttacks.length)}% | Avg phases ${average(typeAttacks.map((event) => event.phases || 0))}`);
-    });
-
-    addSection("COACH TARGETS");
-    coachTargets.forEach(addTargetLine);
-
-    addSection("COACH SUMMARY");
-    coachSummary.forEach((suggestion) => addParagraph(`• ${suggestion}`));
-
-    addSection("STATISTICAL MATCH EVALUATION");
-    if (hasRecordedScore) {
-      addParagraph(`${matchName || "The team"} ${resultType === "win" ? "won" : resultType === "loss" ? "lost" : "drew"} ${teamScoreValue}-${oppositionScoreValue}. The indicators below describe the strongest statistical associations with that result. They should be interpreted alongside coaching context and video evidence rather than as standalone proof of cause.`);
-    } else {
-      addParagraph("A final score was not entered, so the report cannot label the match as a win or loss. The statistical drivers below still summarise the clearest positive and negative influences on performance.");
-    }
-    addParagraph(`Strongest statistical indicators: ${matchStrengths.length ? matchStrengths.map((metric) => `${metric.label} (${metric.display})`).join("; ") : "no statistically reliable target-beating indicator was established"}.`);
-    addParagraph(`Primary development indicators: ${matchWorkOns.length ? matchWorkOns.map((metric) => `${metric.label} (${metric.display}, reference ${metric.target})`).join("; ") : "no statistically reliable benchmark gap was established"}.`);
-    matchWorkOns.forEach((metric) => addParagraph(`${metric.label}: possible contributing factors to validate on video include ${possibleCauses[metric.label] || "execution quality, tactical context and opposition pressure"}.`));
-    if (resultType === "win" && matchStrengths.length) addParagraph(`The leading positive indicators - particularly ${matchStrengths.slice(0, 2).map((metric) => metric.label).join(" and ")} - showed the strongest positive association with the result. Video review should confirm the tactical and technical behaviours behind those numbers.`);
-    if (resultType === "loss" && matchWorkOns.length) addParagraph(`The largest measured gaps - particularly ${matchWorkOns.slice(0, 2).map((metric) => metric.label).join(" and ")} - were the indicators most strongly associated with the result. They are recommended priorities for contextual video review and future training design.`);
-    if (resultType === "draw") addParagraph("The data suggests neither the positive indicators nor the identified gaps created a decisive enough advantage. Review the priority clips for the moments where control could have been converted into scoreboard separation.");
 
     addFooter();
     const totalPages = doc.getNumberOfPages();
@@ -1971,6 +2258,7 @@ export default function App() {
     setCompetition(importedCompetition === "Not specified" ? "" : importedCompetition);
     setEvents(importedEvents);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     setStatusMessage(`${importedEvents.length} events imported.`);
     notify("Analysis Imported", `${importedEvents.length} events loaded from ${fileName}.`, "success");
   }
@@ -1998,7 +2286,7 @@ export default function App() {
 
     const clipGroups = selectedClipTypes
       .map((type) => {
-        const clips = events
+        const rawClips = events
           .filter((event) => matchesClipType(event, type))
           .slice()
           .reverse()
@@ -2008,6 +2296,17 @@ export default function App() {
             return { id: event.id, label: clipLabel(event), originalTime: event.time, rawStart, rawEnd };
           })
           .sort((a, b) => a.rawStart - b.rawStart);
+        const clips = type === "Tackle Missed"
+          ? rawClips.reduce<typeof rawClips>((merged, clip) => {
+              const previous = merged[merged.length - 1];
+              if (previous && clip.rawStart - previous.rawStart <= 2) {
+                previous.rawEnd = Math.max(previous.rawEnd, clip.rawEnd);
+                return merged;
+              }
+              merged.push({ ...clip });
+              return merged;
+            }, [])
+          : rawClips;
         return { type, clips };
       })
       .filter((group) => group.clips.length > 0);
@@ -2062,9 +2361,17 @@ export default function App() {
     setStatusMessage("Generating compilation videos...");
 
     try {
-      const result = await window.electronAPI.generateCompilations({ videoPath: rawVideoPath, groups: orderedGroups });
+      const result = await window.electronAPI.generateCompilations({
+        videoPath: rawVideoPath,
+        groups: orderedGroups,
+        variant: `${selectedClipPadding.before}s-before-${selectedClipPadding.after}s-after`,
+      });
       if (result.success) {
-        setCompilationOutputs(result.outputs || []);
+        setCompilationOutputs((previous) => {
+          const outputsByName = new Map(previous.map((outputPath) => [outputPath.split(/[\\/]/).pop() || outputPath, outputPath]));
+          (result.outputs || []).forEach((outputPath) => outputsByName.set(outputPath.split(/[\\/]/).pop() || outputPath, outputPath));
+          return [...outputsByName.values()];
+        });
         setStatusMessage(`${result.outputs?.length || 0} compilation videos generated.`);
         notify("Compilation Videos Created", `${result.outputs?.length || 0} MP4 files exported successfully.`, "success");
       } else {
@@ -2177,6 +2484,7 @@ export default function App() {
 
     setEditingEvent(null);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     notify("Event Updated", "The event was updated successfully.", "success");
   }
 
@@ -2185,12 +2493,14 @@ export default function App() {
     setEvents((prev) => prev.map((event) => (event.id === editingEvent.id ? { ...event, outcome: undefined, reason: undefined } : event)));
     setEditingEvent(null);
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     notify("Outcome Removed", "The event outcome was removed.", "success");
   }
 
   function deleteEvent(id: number) {
     setEvents((prev) => prev.filter((event) => event.id !== id));
     setGeneratedClips([]);
+    setCompilationOutputs([]);
     notify("Event Deleted", "The event was removed from the log.", "info");
   }
 
@@ -2209,7 +2519,7 @@ export default function App() {
           <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
           <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.8</span>
+          <span className="version-pill">v1.3.9</span>
         </div>
       </header>
     );
@@ -2512,15 +2822,25 @@ export default function App() {
           </>
         ) : (
           <>
-            <div className="button-grid four">
+            <p className="eyebrow">Attack Launch</p>
+            <div className="button-grid two">
               {attackTypes.map((type) => <button key={type} onClick={() => startAttack(type)}>{type}</button>)}
+              <button onClick={startScrumLaunch}>Scrum Won</button>
+              <button className={lineoutLaunchPrompt ? "selected" : ""} onClick={() => { if (requireVideo()) setLineoutLaunchPrompt(true); }}>Lineout Won</button>
             </div>
+            {lineoutLaunchPrompt && <div className="logging-step-card launch-choice-card">
+              <button className="secondary-btn small back-step-btn" onClick={() => setLineoutLaunchPrompt(false)}>← Back</button>
+              <p className="phase-label">How was the lineout launched?</p>
+              <div className="button-grid three">
+                <button onClick={() => chooseLineoutLaunch("Down and Out")}>Down and Out</button>
+                <button onClick={() => chooseLineoutLaunch("Off the Top")}>Off the Top (OT)</button>
+                <button onClick={() => chooseLineoutLaunch("Maul")}>Maul</button>
+              </div>
+            </div>}
             <div>
-              <p className="eyebrow">Set Piece</p>
+              <p className="eyebrow">Set Piece Lost</p>
               <div className="button-grid two">
-                <button onClick={() => addSetPiece("Lineout Won")}>Lineout Won</button>
                 <button className="negative-soft" onClick={() => addSetPiece("Lineout Lost")}>Lineout Lost</button>
-                <button onClick={() => addSetPiece("Scrum Won")}>Scrum Won</button>
                 <button className="negative-soft" onClick={() => addSetPiece("Scrum Lost")}>Scrum Lost</button>
               </div>
             </div>
@@ -2531,9 +2851,8 @@ export default function App() {
               </div>
               {activeRestart && <div className="restart-outcome-step"><button className="secondary-btn small back-step-btn" onClick={() => setActiveRestart(null)}>← Back</button><div className="button-grid two"><button onClick={() => addRestart("Possession Gained")}>Possession Gained</button><button className="negative" onClick={() => addRestart("Possession Lost")}>Possession Lost</button></div></div>}
             </div>
-              <div className="maul-box">
+              {maulActive && <div className="maul-box">
                 <p className="eyebrow">Maul</p>
-                {maulActive ? (
                   <>
                     <div className="active-strip maul-active-strip">
                       <span>Maul Active</span><span>Zone: {maulStartZone}</span><span>Phases: {maulPhaseCount}</span>
@@ -2548,12 +2867,7 @@ export default function App() {
                       <button className="negative" onClick={() => finishMaul("Maul Lost")}>Maul Lost</button>
                     </div>
                   </>
-                ) : (
-                  <div className="button-grid one">
-                    <button onClick={startMaul}>Maul Started</button>
-                  </div>
-                )}
-              </div>
+              </div>}
           </>
         )}
       </div>
@@ -2592,8 +2906,6 @@ export default function App() {
           <button className="negative" onClick={() => addDefenceEvent("Tackle Missed")}>Tackle Missed <kbd>{keybinds.tackleMissed}</kbd></button>
           <button onClick={() => addDefenceEvent("Opponent Lineout Stolen")}>Opponent Lineout Stolen</button>
           <button onClick={() => addDefenceEvent("Opponent Scrum Stolen")}>Opponent Scrum Stolen</button>
-          <button className="negative-soft" onClick={() => addSetPiece("Opposition Lineout Won")}>Opposition Lineout Won</button>
-          <button className="negative-soft" onClick={() => addSetPiece("Opposition Scrum Won")}>Opposition Scrum Won</button>
           <button onClick={() => addDefenceEvent("Opposition Held Up")}>Opposition Held Up <kbd>{keybinds.oppositionHeldUp}</kbd></button>
           <button className="negative" onClick={() => addDefenceEvent("Try Conceded")}>Try Conceded <kbd>{keybinds.tryConceded}</kbd></button>
         </div>
@@ -2617,7 +2929,7 @@ export default function App() {
             <button onClick={() => jumpTo(event.seconds)}>{event.time}</button>
             <strong>{event.category === "attack" ? `${event.attackType} Attack` : event.event}</strong>
             <span title={event.category === "attack" ? zoneProgression(event) : event.zone}>{event.category === "attack" ? zoneProgression(event) : event.zone}</span>
-            <span>{event.category === "attack" ? `${event.phases || 0} phases • ${event.outcome || "No outcome"}${event.kickType ? ` • ${event.kickType} kick to ${event.endZone || event.zone}` : ""}` : event.outcome || event.category}</span>
+            <span>{event.category === "attack" ? `${event.lineoutLaunch ? `${event.lineoutLaunch} lineout • ` : ""}${event.phases || 0} phases • ${event.outcome || "No outcome"}${event.kickType ? ` • ${event.kickType} kick to ${event.endZone || event.zone}` : ""}` : event.outcome || event.category}</span>
             <span>{event.reason || "—"}</span>
             <div className="event-actions">
               <button onClick={() => openEditEvent(event)}>Edit</button>
