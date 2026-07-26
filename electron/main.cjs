@@ -51,6 +51,15 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.4.0": [
+      "Added Good Attacking Sequences as a video-review marker without changing match statistics.",
+      "Scrum and lineout launch compilations now run from the original launch through every phase to the final outcome.",
+      "Included lineout-to-maul launches in the full-sequence clipping workflow.",
+      "Added Holding On as an attacking penalty-conceded reason and consolidated knock-ons and forward passes under Handling Error.",
+      "Introduced a premium graphite visual system with restrained lime highlights and refined gold coaching accents.",
+      "Upgraded panels, buttons, inputs, video framing, scrollbars, focus states and subtle interface motion.",
+      "Improved toolbar wrapping and visual stability across narrower desktop windows.",
+    ],
     "1.3.9": [
       "Redesigned the customer report cover as a premium, team-colour-driven match dossier.",
       "Reordered reports around coaching priority: key takeaways, set piece, kicking, attack, Gold Zone, defence, discipline and territory.",

@@ -102,6 +102,8 @@ type EventLog = {
   endZone?: string;
   goldZoneEntry?: boolean;
   goldZoneOutcome?: string;
+  attackStartSeconds?: number;
+  positiveSequence?: boolean;
 };
 
 type ClipGroup = {
@@ -139,8 +141,7 @@ function isSuccessfulAttackEvent(event: EventLog) {
 }
 
 const ballLostReasons = [
-  "Knock-on",
-  "Forward Pass",
+  "Handling Error",
   "Intercept",
   "Penalty Conceded",
   "Turnover",
@@ -178,6 +179,7 @@ const penaltyReasons = [
 ];
 
 const penaltyConcededReasons = [
+  "Holding On",
   "Offside",
   "High Tackle",
   "Not Rolling Away",
@@ -190,6 +192,7 @@ const penaltyConcededReasons = [
 ];
 
 const clipTypeOptions = [
+  "Good Attacking Sequences",
   "Gold Zone Entries",
   "Scrum Launch",
   "Lineout Launch",
@@ -226,6 +229,7 @@ const clipTypeOptions = [
 ];
 
 const defaultReviewClipTypes = [
+  "Good Attacking Sequences",
   "Ball Lost",
   "Try Conceded",
   "Gold Zone Entries",
@@ -333,7 +337,7 @@ function toFileUrl(filePath: string) {
 function clipLabel(event: EventLog) {
   const reason = event.reason ? ` • ${event.reason}` : "";
   if (event.kickType) return `${event.kickType} Kick • ${event.zone}${event.endZone ? ` to ${event.endZone}` : ""} • ${event.outcome}${reason}`;
-  if (event.category === "attack") return `${event.attackType} Attack${event.lineoutLaunch ? ` • ${event.lineoutLaunch} lineout` : ""} • ${event.zone} • ${event.outcome}${reason}`;
+  if (event.category === "attack") return `${event.positiveSequence ? "Good Attacking Sequence • " : ""}${event.attackType} Attack${event.lineoutLaunch ? ` • ${event.lineoutLaunch} lineout` : ""} • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "kick") return `Kick Event • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "defence") return `${event.event} • ${event.zone}${reason}`;
   if (event.category === "maul") return `${event.event} • ${event.zone}${reason}`;
@@ -341,9 +345,10 @@ function clipLabel(event: EventLog) {
 }
 
 function matchesClipType(event: EventLog, type: string) {
+  if (type === "Good Attacking Sequences") return event.category === "attack" && event.positiveSequence === true;
   if (type === "Gold Zone Entries") return event.category === "attack" && (event.goldZoneEntry === true || (event.goldZoneEntry === undefined && event.zone === "Opp 22"));
   if (type === "Scrum Launch") return event.launchType === "Scrum";
-  if (type === "Lineout Launch") return event.launchType === "Lineout";
+  if (type === "Lineout Launch") return event.launchType === "Lineout" || Boolean(event.lineoutLaunch);
   if (type === "Maul Launch") return event.launchType === "Maul" || event.lineoutLaunch === "Maul";
   if (type.endsWith("Attack")) return event.category === "attack" && event.attackType === type.replace(" Attack", "");
   if (["Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"].includes(type)) {
@@ -588,6 +593,8 @@ export default function App() {
 
   const [attackActive, setAttackActive] = useState(false);
   const [attackStartZone, setAttackStartZone] = useState("");
+  const [attackStartSeconds, setAttackStartSeconds] = useState(0);
+  const [positiveAttackSequence, setPositiveAttackSequence] = useState(false);
   const [currentAttackType, setCurrentAttackType] = useState("");
   const [currentLaunchType, setCurrentLaunchType] = useState<"Scrum" | "Lineout" | null>(null);
   const [currentLineoutLaunch, setCurrentLineoutLaunch] = useState<"Down and Out" | "Off the Top" | null>(null);
@@ -605,8 +612,9 @@ export default function App() {
   const [attackAction, setAttackAction] = useState<AttackAction>("phase");
   const [maulActive, setMaulActive] = useState(false);
   const [maulStartZone, setMaulStartZone] = useState("");
+  const [maulStartSeconds, setMaulStartSeconds] = useState(0);
   const [maulPhaseCount, setMaulPhaseCount] = useState(0);
-  const [ballLostReason, setBallLostReason] = useState("Knock-on");
+  const [ballLostReason, setBallLostReason] = useState("Handling Error");
   const [ballWonReason, setBallWonReason] = useState("Jackal");
   const [penaltyWonReason, setPenaltyWonReason] = useState("Holding On");
   const [penaltyConcededReason, setPenaltyConcededReason] = useState("Offside");
@@ -631,7 +639,7 @@ export default function App() {
   const [showMatchCheck, setShowMatchCheck] = useState(false);
   const [showShortcutGuide, setShowShortcutGuide] = useState(false);
   const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
-  const [appVersion, setAppVersion] = useState("1.3.9");
+  const [appVersion, setAppVersion] = useState("1.4.0");
   const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
 
   const attacks = events.filter((event) => event.category === "attack");
@@ -1048,6 +1056,8 @@ export default function App() {
     if (!requireVideo()) return;
     setAttackActive(true);
     setAttackStartZone(selectedZone);
+    setAttackStartSeconds(currentSeconds());
+    setPositiveAttackSequence(false);
     setCurrentAttackType(type);
     setCurrentLaunchType(launchType);
     setCurrentLineoutLaunch(lineoutLaunch);
@@ -1105,6 +1115,8 @@ export default function App() {
       kickType,
       endZone: selectedZone,
       goldZoneEntry: activeGoldZoneEntry,
+      attackStartSeconds,
+      positiveSequence: positiveAttackSequence,
     });
     const closesGoldZonePossession = !["Penalty Won", "Held Up – Retain Ball", "Contestable Kick Regained"].includes(outcome);
     if (possessionInGoldZone && closesGoldZonePossession) {
@@ -1116,6 +1128,8 @@ export default function App() {
     }
     setAttackActive(false);
     setAttackStartZone("");
+    setAttackStartSeconds(0);
+    setPositiveAttackSequence(false);
     setCurrentAttackType("");
     setCurrentLaunchType(null);
     setCurrentLineoutLaunch(null);
@@ -1148,9 +1162,12 @@ export default function App() {
     setMaulFromLineout(fromLineout);
     setMaulActive(true);
     setMaulStartZone(selectedZone);
+    setMaulStartSeconds(currentSeconds());
     setMaulPhaseCount(0);
     setAttackActive(false);
     setAttackStartZone("");
+    setAttackStartSeconds(0);
+    setPositiveAttackSequence(false);
     setCurrentAttackType("");
     setPhaseCount(0);
     setPhasePerformance([]);
@@ -1172,11 +1189,13 @@ export default function App() {
       zone: maulStartZone,
       launchType: "Maul",
       lineoutLaunch: maulFromLineout ? "Maul" : undefined,
+      attackStartSeconds: maulStartSeconds,
     });
 
     const retainedZone = maulStartZone;
     setMaulActive(false);
     setMaulStartZone("");
+    setMaulStartSeconds(0);
     setMaulPhaseCount(0);
     setMaulFromLineout(false);
     setMaulFromLineout(false);
@@ -1184,6 +1203,8 @@ export default function App() {
     if (outcome === "Maul Retained") {
       setAttackActive(true);
       setAttackStartZone(retainedZone || selectedZone);
+      setAttackStartSeconds(currentSeconds());
+      setPositiveAttackSequence(false);
       setCurrentAttackType("Maul");
       setPhaseCount(0);
       switchPanel("attack", "Maul retained. Continue tracking the next attack phases.");
@@ -1222,6 +1243,8 @@ export default function App() {
   function cancelCurrentEvent() {
     setAttackActive(false);
     setAttackStartZone("");
+    setAttackStartSeconds(0);
+    setPositiveAttackSequence(false);
     setCurrentAttackType("");
     setCurrentLaunchType(null);
     setCurrentLineoutLaunch(null);
@@ -1236,6 +1259,7 @@ export default function App() {
     setAttackAction("phase");
     setMaulActive(false);
     setMaulStartZone("");
+    setMaulStartSeconds(0);
     setMaulPhaseCount(0);
     setMaulFromLineout(false);
     notify("Returned", "Current logging step cancelled. No event was added.", "info");
@@ -1264,6 +1288,8 @@ export default function App() {
     setActivePanel("attack");
     setAttackActive(false);
     setAttackStartZone("");
+    setAttackStartSeconds(0);
+    setPositiveAttackSequence(false);
     setCurrentAttackType("");
     setCurrentLaunchType(null);
     setCurrentLineoutLaunch(null);
@@ -1282,6 +1308,7 @@ export default function App() {
     setPendingRuckSpeed(null);
     setMaulActive(false);
     setMaulStartZone("");
+    setMaulStartSeconds(0);
     setMaulPhaseCount(0);
     setMaulFromLineout(false);
     setRawVideoName("");
@@ -1308,7 +1335,7 @@ export default function App() {
 
   function saveProject() {
     const project = {
-      version: "1.3.9",
+      version: "1.4.0",
       matchName,
       opposition,
       competition,
@@ -1585,7 +1612,7 @@ export default function App() {
       doc.setTextColor(100, 116, 139);
       doc.setFontSize(8);
       doc.setFont("helvetica", "normal");
-      doc.text("Generated by Rugby Analysis Suite v1.3.9", margin, pageHeight - 8);
+      doc.text("Generated by Rugby Analysis Suite v1.4.0", margin, pageHeight - 8);
       doc.text(new Date().toLocaleDateString(), pageWidth - margin, pageHeight - 8, { align: "right" });
     }
 
@@ -2291,7 +2318,12 @@ export default function App() {
           .slice()
           .reverse()
           .map((event) => {
-            const rawStart = Math.max(0, event.seconds - selectedClipPadding.before);
+            const storedAttackStart = event.attackStartSeconds;
+            const usesFullAttack = ["Good Attacking Sequences", "Scrum Launch", "Lineout Launch"].includes(type)
+              && typeof storedAttackStart === "number";
+            const rawStart = usesFullAttack
+              ? Math.max(0, storedAttackStart - 2)
+              : Math.max(0, event.seconds - selectedClipPadding.before);
             const rawEnd = Math.max(rawStart + 1, event.seconds + selectedClipPadding.after);
             return { id: event.id, label: clipLabel(event), originalTime: event.time, rawStart, rawEnd };
           })
@@ -2519,7 +2551,7 @@ export default function App() {
           <button className="analyst-chip" onClick={() => setProfileSelected(false)}><span>{analystProfile.name.split(" ").map((part) => part[0]).join("").slice(0, 2)}</span><div><strong>{analystProfile.name}</strong><small>{activeAnalystId === "jd" ? "Owner" : "Analyst"}</small></div></button>
           <button className="support-btn" onClick={() => setView("settings")}>Settings</button>
           <button className="support-btn" onClick={() => setView("support")}>Support</button>
-          <span className="version-pill">v1.3.9</span>
+          <span className="version-pill">v1.4.0</span>
         </div>
       </header>
     );
@@ -2769,6 +2801,12 @@ export default function App() {
             <div className="active-strip">
               <span>Type: {currentAttackType}</span><span>Zone: {attackStartZone}</span><span>Phases: {phaseCount}</span>
             </div>
+            <button
+              className={`positive-sequence-btn ${positiveAttackSequence ? "selected" : ""}`}
+              onClick={() => setPositiveAttackSequence((marked) => !marked)}
+            >
+              {positiveAttackSequence ? "✓ Good Attacking Sequence Marked" : "☆ Mark as Good Attacking Sequence"}
+            </button>
             <div className="active-action-tabs">
               <button className={attackAction === "phase" ? "active" : ""} onClick={() => setAttackAction("phase")}>Log Phase</button>
               <button className={attackAction === "finish" ? "active" : ""} onClick={() => setAttackAction("finish")}>Finish Attack</button>
