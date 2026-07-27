@@ -191,42 +191,13 @@ const penaltyConcededReasons = [
   "Other",
 ];
 
-const clipTypeOptions = [
-  "Good Attacking Sequences",
-  "Gold Zone Entries",
-  "Scrum Launch",
-  "Lineout Launch",
-  "Transition Attack",
-  "Kick Return Attack",
-  "Maul Launch",
-  "Penalty Won",
-  "Try Scored",
-  "3 Points Taken",
-  "Ball Lost",
-  "Held Up – Retain Ball",
-  "Lineout Won",
-  "Lineout Lost",
-  "Scrum Won",
-  "Scrum Lost",
-  "Contestable Kick Regained",
-  "Contestable Kick Lost",
-  "Successful Exit",
-  "Failed Exit",
-  "Positive Clearance",
-  "Poor Clearance",
-  "Tackle Made",
-  "Tackle Missed",
-  "Ball Won",
-  "Opponent Lineout Stolen",
-  "Opponent Scrum Stolen",
-  "Try Conceded",
-  "Penalty Conceded",
-  "Maul Retained",
-  "Maul Penalty Won",
-  "Maul Try",
-  "Maul Sacked",
-  "Maul Lost",
-];
+const clipTypeGroups = [
+  { id: "attack", label: "Attack", types: ["Good Attacking Sequences", "Gold Zone Entries", "Scrum Launch", "Lineout Launch", "Transition Attack", "Kick Return Attack", "Maul Launch", "Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"] },
+  { id: "set-piece", label: "Set Piece", types: ["Lineout Won", "Lineout Lost", "Scrum Won", "Scrum Lost", "Opponent Lineout Stolen", "Opponent Scrum Stolen"] },
+  { id: "kicking", label: "Kicking", types: ["Contestable Kick Regained", "Contestable Kick Lost", "Successful Exit", "Failed Exit", "Positive Clearance", "Poor Clearance"] },
+  { id: "defence", label: "Defence", types: ["Tackle Made", "Tackle Missed", "Ball Won", "Try Conceded", "Penalty Conceded"] },
+  { id: "maul", label: "Maul", types: ["Maul Retained", "Maul Penalty Won", "Maul Try", "Maul Sacked", "Maul Lost"] },
+] as const;
 
 const defaultReviewClipTypes = [
   "Good Attacking Sequences",
@@ -3126,8 +3097,18 @@ export default function App() {
         <section className="work-grid">
           <div className="panel selector-card">
             <div className="section-head"><div><p className="eyebrow">Compilation Types</p><h2>Select Outputs</h2></div><span className="pill">{selectedClipTypes.length} selected</span></div>
-            <div className="options">
-              {clipTypeOptions.map((type) => <button key={type} onClick={() => toggleClipType(type)} className={selectedClipTypes.includes(type) ? "selected" : ""}>{selectedClipTypes.includes(type) ? "✓ " : ""}{type}</button>)}
+            <div className="clip-type-picker">
+              {clipTypeGroups.map((group) => {
+                const groupSelectedCount = group.types.filter((type) => selectedClipTypes.includes(type)).length;
+                return (
+                  <details className="clip-type-group-dropdown" key={group.id}>
+                    <summary><span>{group.label}</span><small>{groupSelectedCount} selected</small><i aria-hidden="true">⌄</i></summary>
+                    <div className="options clip-type-options">
+                      {group.types.map((type) => <button key={type} onClick={() => toggleClipType(type)} className={selectedClipTypes.includes(type) ? "selected" : ""} aria-pressed={selectedClipTypes.includes(type)}><span className="clip-option-check">{selectedClipTypes.includes(type) ? "✓" : ""}</span>{type}</button>)}
+                    </div>
+                  </details>
+                );
+              })}
             </div>
             <div className="padding-card">
               <div className="section-head compact"><div><p className="eyebrow">Clip Padding</p><h2>{selectedClipPadding.before}s before / {selectedClipPadding.after}s after</h2></div></div>

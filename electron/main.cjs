@@ -51,6 +51,11 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.4.1": [
+      "Organised compilation types into collapsible Attack, Set Piece, Kicking, Defence and Maul groups.",
+      "Simplified the Auto Clip Creator selector while preserving the existing clip-generation workflow.",
+      "Updates now install silently when the app restarts, without showing the Windows installer wizard.",
+    ],
     "1.4.0": [
       "Added Good Attacking Sequences as a video-review marker without changing match statistics.",
       "Scrum and lineout launch compilations now run from the original launch through every phase to the final outcome.",
@@ -209,13 +214,13 @@ function setupAutoUpdater() {
       type: "info",
       title: "Update Ready",
       message: "The update has been downloaded.",
-      detail: "Restart Rugby Analysis Suite now to install it?",
+      detail: "Restart Rugby Analysis Suite now to apply it? The update will install silently.",
       buttons: ["Restart Now", "Later"],
       defaultId: 0,
       cancelId: 1,
     });
 
-    if (result.response === 0) autoUpdater.quitAndInstall();
+    if (result.response === 0) autoUpdater.quitAndInstall(true, true);
   });
 
   autoUpdater.on("error", (error) => {

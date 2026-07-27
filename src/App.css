@@ -988,6 +988,22 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .options { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .options button { border: 1px solid rgba(255,255,255,0.12); border-radius: 14px; background: rgba(255,255,255,0.06); color: #fff; padding: 13px; text-align: left; font-weight: 800; }
 .options button.selected { border-color: var(--green); background: rgba(126,217,87,0.18); }
+.clip-type-picker { display: grid; gap: 9px; }
+.clip-type-group-dropdown { overflow: hidden; border: 1px solid rgba(255,255,255,0.11); border-radius: 15px; background: rgba(0,0,0,0.2); }
+.clip-type-group-dropdown[open] { border-color: rgba(126,217,87,0.32); background: rgba(126,217,87,0.04); }
+.clip-type-group-dropdown summary { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px; min-height: 52px; padding: 0 15px; color: #fff; cursor: pointer; list-style: none; font-weight: 900; }
+.clip-type-group-dropdown summary::-webkit-details-marker { display: none; }
+.clip-type-group-dropdown summary:hover { background: rgba(255,255,255,0.045); }
+.clip-type-group-dropdown summary small { color: var(--muted); font-size: 11px; font-weight: 800; }
+.clip-type-group-dropdown summary i { color: var(--green); font-size: 18px; font-style: normal; transition: transform .18s ease; }
+.clip-type-group-dropdown[open] summary i { transform: rotate(180deg); }
+.clip-type-options { padding: 0 12px 12px; align-content: start; }
+.clip-type-options button { display: flex; align-items: center; gap: 9px; min-height: 48px; }
+.clip-option-check { flex: 0 0 20px; width: 20px; height: 20px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,0.18); border-radius: 6px; font-size: 12px; }
+.clip-type-options button.selected .clip-option-check { border-color: var(--green); background: var(--green); color: #061008; }
+@media (max-width: 700px) {
+  .clip-type-options { grid-template-columns: 1fr; }
+}
 .summary-strip { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
 .summary-strip span { border-radius: 15px; background: rgba(255,255,255,0.08); padding: 15px; text-align: center; font-weight: 900; color: #fff; }
 .preview-list { max-height: 540px; overflow: auto; padding-right: 6px; }
