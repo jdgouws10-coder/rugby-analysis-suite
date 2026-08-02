@@ -2154,26 +2154,26 @@ export default function App() {
     doc.text(`${competition || "MATCH REVIEW"}  /  ${events.length} EVENTS LOGGED  /  ${rawVideoName || "NO FOOTAGE LINKED"}`.toUpperCase(), margin, y);
     y += 8;
 
-    addSection(hasRecordedScore ? `WHY ${matchName || "THE TEAM"} ${resultType === "win" ? "WON" : resultType === "loss" ? "LOST" : "DREW"}`.toUpperCase() : "KEY STATISTICAL TAKEAWAYS");
+    addSection("KEY STATISTICAL TAKEAWAYS");
     if (hasRecordedScore) {
       const marginValue = Math.abs(teamScoreValue - oppositionScoreValue);
-      addParagraph(`${teamScoreValue}-${oppositionScoreValue}${marginValue ? ` • ${marginValue}-point margin` : ""}. Four quick, evidence-led result drivers for coaches.`);
+      addParagraph(`${teamScoreValue}-${oppositionScoreValue}${marginValue ? ` • ${marginValue}-point margin` : ""}. Five concise, evidence-led performance pointers for coaches.`);
     } else {
-      addParagraph("Four quick, evidence-led performance pointers. Add the final score to make these result-specific.");
+      addParagraph("Five concise, evidence-led performance pointers. Add the final score to provide match context.");
     }
     const orderedTakeaways = resultType === "loss"
       ? [...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const })), ...matchStrengths.map((metric) => ({ metric, tone: "positive" as const }))]
       : resultType === "win"
         ? [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))]
         : [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))].sort((a, b) => b.metric.priority - a.metric.priority);
-    const takeawayItems = orderedTakeaways.slice(0, 4);
+    const takeawayItems = orderedTakeaways.slice(0, 5);
     if (takeawayItems.length) {
       takeawayItems.forEach(({ metric, tone }, index) => addInsightCard(
         index + 1,
         `${tone === "positive" ? "POSITIVE" : "COST"}  •  ${metric.label}`,
         tone === "positive"
-          ? `${metric.display} against a ${metric.target} reference. A clear positive result driver.`
-          : `${metric.display} against a ${metric.target} reference. A clear measured cost to review.`,
+          ? `${metric.display} against a ${metric.target} reference. A key positive performance indicator.`
+          : `${metric.display} against a ${metric.target} reference. A key development indicator to review.`,
         tone,
       ));
     } else {
