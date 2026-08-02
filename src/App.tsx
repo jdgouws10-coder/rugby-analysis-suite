@@ -9,6 +9,10 @@ declare global {
   interface Window {
     electronAPI: {
       selectVideo: () => Promise<{ path: string; name: string; url: string } | null>;
+      cloudStorageStatus: () => Promise<{ configured: boolean; bucket: string; retentionDays: number }>;
+      configureCloudStorage: (data: { accessKeyId: string; secretAccessKey: string }) => Promise<{ success: boolean; bucket?: string; message?: string }>;
+      uploadVideoToCloud: (data: { videoPath: string; contentType?: string }) => Promise<{ success: boolean; key?: string; name?: string; size?: number; retentionDays?: number; message?: string }>;
+      onCloudUploadProgress: (callback: (progress: { loaded: number; total: number; percent: number; done?: boolean }) => void) => () => void;
       optimiseVideoForPlayback: (data: { videoPath: string }) => Promise<{
         success: boolean;
         path?: string;
@@ -26,9 +30,26 @@ declare global {
         groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
         variant: string;
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
+      buildTrainingDataset: (data: {
+        videoPath: string;
+        videoName: string;
+        projectName: string;
+        matchName: string;
+        opposition: string;
+        teamColour: string;
+        direction: string;
+        camera: string;
+        events: EventLog[];
+      }) => Promise<{ success: boolean; folder?: string; datasetId?: string; clips?: number; message?: string }>;
+      listTrainingDatasets: () => Promise<{ success: boolean; datasets?: TrainingDataset[]; message?: string }>;
+      updateTrainingExample: (data: { datasetId: string; exampleId: number; reviewStatus: string; correctedEvent?: string }) => Promise<{ success: boolean; message?: string }>;
+      runAIScan: (data: { videoPath: string }) => Promise<{ success: boolean; detections?: Omit<AIReviewEvent, "id">[]; framesScanned?: number; experimental?: boolean; message?: string }>;
+      retrainAIModel: () => Promise<{ success: boolean; validationAccuracy?: number; classes?: number; frames?: number; message?: string }>;
       exportCoachPackage: (data: { pdfBase64: string; html: string; videoPaths: string[]; suggestedName: string }) => Promise<{ success: boolean; folder?: string; message?: string }>;
       onUpdateProgress?: (callback: (progress: { percent: number; transferred?: number; total?: number }) => void) => () => void;
       onCompilationProgress?: (callback: (progress: { group?: string; clip?: number; groupClips?: number; completed: number; total: number; percent: number; done?: boolean }) => void) => () => void;
+      onTrainingProgress?: (callback: (progress: { event?: string; completed: number; total: number; percent: number; done?: boolean }) => void) => () => void;
+      onAIScanProgress?: (callback: (progress: { stage: string; completed?: number; total?: number; percent?: number }) => void) => () => void;
       checkForUpdates?: () => Promise<{ success: boolean; message?: string }>;
       getAppVersion?: () => Promise<string>;
       onUpdateStatus?: (callback: (status: { state: string; message: string; version?: string }) => void) => () => void;
@@ -128,6 +149,47 @@ type EditableEvent = {
   reason: string;
   zone: string;
   note: string;
+};
+
+type AIReviewEvent = EventLog & {
+  confidence: number;
+  explanation: string;
+  reviewStatus: "pending" | "accepted" | "rejected";
+};
+
+type TrainingExample = {
+  id: number;
+  category: string;
+  event: string;
+  correctedEvent?: string;
+  outcome?: string;
+  reason?: string;
+  zone?: string;
+  timestamp: number;
+  originalTime: string;
+  clipStart: number;
+  clipEnd: number;
+  clipUrl: string;
+  reviewStatus: "trusted" | "pending" | "approved" | "rejected" | "duplicate" | "unclear";
+};
+
+type TrainingDataset = {
+  id: string;
+  status: string;
+  createdAt: string;
+  team: string;
+  opposition: string;
+  videoName: string;
+  examples: TrainingExample[];
+};
+
+type AIComparison = {
+  correct: number;
+  wrongLabel: number;
+  falseDetections: number;
+  missed: number;
+  meanTimingError: number;
+  totalGroundTruth: number;
 };
 
 const pitchZones = ["Opp 22", "Opp Half", "Midfield", "Own Half", "Own 22"];
@@ -596,6 +658,13 @@ export default function App() {
   const [playbackVideoUrl, setPlaybackVideoUrl] = useState("");
   const [isOptimisingVideo, setIsOptimisingVideo] = useState(false);
   const [optimiseAttempted, setOptimiseAttempted] = useState(false);
+  const [cloudConfigured, setCloudConfigured] = useState(false);
+  const [cloudUploadProgress, setCloudUploadProgress] = useState(0);
+  const [isCloudUploading, setIsCloudUploading] = useState(false);
+  const [showCloudSetup, setShowCloudSetup] = useState(false);
+  const [cloudAccessKey, setCloudAccessKey] = useState("");
+  const [cloudSecretKey, setCloudSecretKey] = useState("");
+  const [cloudObjectKey, setCloudObjectKey] = useState("");
 
   const [selectedClipTypes, setSelectedClipTypes] = useState<string[]>(defaultReviewClipTypes);
   const [clipPaddingPresetId, setClipPaddingPresetId] = useState<ClipPaddingPresetId>("coach");
@@ -612,6 +681,36 @@ export default function App() {
   const [recoveryCandidate, setRecoveryCandidate] = useState<any>(null);
   const [appVersion, setAppVersion] = useState("1.4.0");
   const [updateStatus, setUpdateStatus] = useState({ state: "idle", message: "Ready to check for updates." });
+  const [aiReviewEvents, setAiReviewEvents] = useState<AIReviewEvent[]>([]);
+  const [aiScanStatus, setAiScanStatus] = useState<"ready" | "scanning" | "review">("ready");
+  const [aiScanProgress, setAiScanProgress] = useState(0);
+  const [aiScanStage, setAiScanStage] = useState("Ready for footage");
+  const [aiTeamColour, setAiTeamColour] = useState("");
+  const [aiOppositionColour, setAiOppositionColour] = useState("");
+  const [aiDirection, setAiDirection] = useState("unknown");
+  const [aiCamera, setAiCamera] = useState("single-wide");
+  const [aiComparison, setAiComparison] = useState<AIComparison | null>(null);
+  const [aiGroundTruth, setAiGroundTruth] = useState<{ name: string; events: EventLog[] } | null>(null);
+  const [isLearningGroundTruth, setIsLearningGroundTruth] = useState(false);
+  const aiGroundTruthInputRef = useRef<HTMLInputElement | null>(null);
+  const [aiTab, setAiTab] = useState<"analyse" | "training">("analyse");
+  const [trainingVideo, setTrainingVideo] = useState<{ path: string; name: string; url: string; duration: number } | null>(null);
+  const [trainingProject, setTrainingProject] = useState<{ name: string; events: EventLog[]; matchName: string; opposition: string } | null>(null);
+  const [trainingTeamColour, setTrainingTeamColour] = useState("");
+  const [trainingDirection, setTrainingDirection] = useState("unknown");
+  const [trainingCamera, setTrainingCamera] = useState("single-wide");
+  const [trainingPermission, setTrainingPermission] = useState(false);
+  const [isBuildingTrainingDataset, setIsBuildingTrainingDataset] = useState(false);
+  const [trainingProgress, setTrainingProgress] = useState<{ event?: string; completed: number; total: number; percent: number } | null>(null);
+  const [trainingDatasets, setTrainingDatasets] = useState<TrainingDataset[]>([]);
+  const [selectedTrainingDatasetId, setSelectedTrainingDatasetId] = useState("");
+  const [trainingLibraryMode, setTrainingLibraryMode] = useState<"import" | "review">("import");
+  const [trainingReviewFilter, setTrainingReviewFilter] = useState("all");
+  const [trainingEventFilter, setTrainingEventFilter] = useState("all");
+  const [trainingCategoryFilter, setTrainingCategoryFilter] = useState("all");
+  const [activeTrainingExampleId, setActiveTrainingExampleId] = useState<number | null>(null);
+  const [isLoadingTrainingDatasets, setIsLoadingTrainingDatasets] = useState(false);
+  const trainingProjectInputRef = useRef<HTMLInputElement | null>(null);
 
   const attacks = events.filter((event) => event.category === "attack");
   const defenceEvents = events.filter((event) => event.category === "defence");
@@ -752,8 +851,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    window.electronAPI?.cloudStorageStatus?.().then((status) => setCloudConfigured(status.configured)).catch(() => {});
+    return window.electronAPI?.onCloudUploadProgress?.((progress) => setCloudUploadProgress(Math.round(progress.percent || 0)));
+  }, []);
+
+  useEffect(() => {
     if (!window.electronAPI?.onCompilationProgress) return;
     return window.electronAPI.onCompilationProgress((progress) => setCompilationProgress(progress.done ? null : progress));
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onTrainingProgress) return;
+    return window.electronAPI.onTrainingProgress((progress) => setTrainingProgress(progress.done ? null : progress));
+  }, []);
+
+  useEffect(() => {
+    if (!window.electronAPI?.onAIScanProgress) return;
+    return window.electronAPI.onAIScanProgress((progress) => {
+      setAiScanStage(progress.stage || "Analysing match");
+      setAiScanProgress(Math.round(progress.percent || 0));
+    });
   }, []);
 
   useEffect(() => {
@@ -930,6 +1047,36 @@ export default function App() {
     setCompilationOutputs([]);
     setStatusMessage(`${file.name} loaded.`);
     notify("Match Footage Loaded", file.name, "success");
+  }
+
+  async function connectCloudStorage() {
+    const result = await window.electronAPI.configureCloudStorage({ accessKeyId: cloudAccessKey, secretAccessKey: cloudSecretKey });
+    if (!result.success) {
+      notify("Cloud Connection Failed", result.message || "The credentials could not access the private footage bucket.", "error");
+      return;
+    }
+    setCloudConfigured(true);
+    setCloudAccessKey("");
+    setCloudSecretKey("");
+    setShowCloudSetup(false);
+    notify("Cloud Storage Connected", "Credentials are encrypted by Windows and kept outside match files.", "success");
+  }
+
+  async function uploadCurrentVideoToCloud() {
+    if (!rawVideoPath || isCloudUploading) return;
+    setIsCloudUploading(true);
+    setCloudUploadProgress(0);
+    setStatusMessage("Uploading raw footage to private cloud storage...");
+    const result = await window.electronAPI.uploadVideoToCloud({ videoPath: rawVideoPath });
+    setIsCloudUploading(false);
+    if (result.success && result.key) {
+      setCloudObjectKey(result.key);
+      setStatusMessage(`${rawVideoName} safely stored in Cloudflare R2.`);
+      notify("Cloud Upload Complete", `Verified in private storage. Raw footage expires automatically after ${result.retentionDays || 60} days.`, "success");
+    } else {
+      setStatusMessage("Cloud upload failed; the local footage was not changed.");
+      notify("Cloud Upload Failed", result.message || "The footage remains safely on this PC.", "error");
+    }
   }
 
   async function optimiseCurrentVideoForPlayback() {
@@ -2007,34 +2154,31 @@ export default function App() {
     doc.text(`${competition || "MATCH REVIEW"}  /  ${events.length} EVENTS LOGGED  /  ${rawVideoName || "NO FOOTAGE LINKED"}`.toUpperCase(), margin, y);
     y += 8;
 
-    addSection("KEY STATISTICAL TAKEAWAYS");
+    addSection(hasRecordedScore ? `WHY ${matchName || "THE TEAM"} ${resultType === "win" ? "WON" : resultType === "loss" ? "LOST" : "DREW"}`.toUpperCase() : "KEY STATISTICAL TAKEAWAYS");
     if (hasRecordedScore) {
       const marginValue = Math.abs(teamScoreValue - oppositionScoreValue);
-      addParagraph(`${matchName || "The team"} ${resultType === "win" ? "won" : resultType === "loss" ? "lost" : "drew"} ${teamScoreValue}-${oppositionScoreValue}${marginValue ? ` (${marginValue}-point margin)` : ""}. The takeaways below are ordered around the indicators most consistent with that result, while retaining the strongest evidence on the other side of the performance.`);
+      addParagraph(`${teamScoreValue}-${oppositionScoreValue}${marginValue ? ` • ${marginValue}-point margin` : ""}. Four quick, evidence-led result drivers for coaches.`);
     } else {
-      addParagraph("No final score was entered. The strongest positive and negative indicators are therefore ordered by the size of their measured difference from the reference benchmarks.");
+      addParagraph("Four quick, evidence-led performance pointers. Add the final score to make these result-specific.");
     }
-    const takeawayItems = resultType === "loss"
+    const orderedTakeaways = resultType === "loss"
       ? [...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const })), ...matchStrengths.map((metric) => ({ metric, tone: "positive" as const }))]
       : resultType === "win"
         ? [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))]
         : [...matchStrengths.map((metric) => ({ metric, tone: "positive" as const })), ...matchWorkOns.map((metric) => ({ metric, tone: "risk" as const }))].sort((a, b) => b.metric.priority - a.metric.priority);
+    const takeawayItems = orderedTakeaways.slice(0, 4);
     if (takeawayItems.length) {
       takeawayItems.forEach(({ metric, tone }, index) => addInsightCard(
         index + 1,
-        `${tone === "positive" ? "POSITIVE" : "DEVELOPMENT"}  •  ${metric.label}`,
+        `${tone === "positive" ? "POSITIVE" : "COST"}  •  ${metric.label}`,
         tone === "positive"
-          ? `${metric.display}. This met or exceeded the ${metric.target} reference and was a statistically supported positive contributor to review on video.`
-          : `${metric.display}. Reference: ${metric.target}. This was a measured performance gap with a plausible association to the result and should be checked against the corresponding clips.`,
+          ? `${metric.display} against a ${metric.target} reference. A clear positive result driver.`
+          : `${metric.display} against a ${metric.target} reference. A clear measured cost to review.`,
         tone,
       ));
     } else {
       addInsightCard(1, "INSUFFICIENT SAMPLE", "The available match sample did not contain enough classified events to establish reliable benchmark comparisons.", "risk");
     }
-    if (hasRecordedScore && resultType === "win") addParagraph(`Statistical result driver: the strongest result-aligned positives were ${matchStrengths.length ? matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") : "not established by the available sample"}. The main costs that remained despite the win were ${matchWorkOns.length ? matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") : "not statistically material in the logged sample"}.`);
-    if (hasRecordedScore && resultType === "loss") addParagraph(`Statistical result driver: the most important measured costs were ${matchWorkOns.length ? matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") : "not established by the available sample"}. The strongest positives retained despite the loss were ${matchStrengths.length ? matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") : "not statistically established"}.`);
-    if (hasRecordedScore && resultType === "draw") addParagraph(`Statistical result driver: the positive indicators (${matchStrengths.slice(0, 3).map((metric) => metric.label).join(", ") || "none established"}) were offset by the main measured costs (${matchWorkOns.slice(0, 3).map((metric) => metric.label).join(", ") || "none established"}).`);
-
     addSection("ADDITIONAL CONTRIBUTING FACTORS");
     if (matchWorkOns.length) {
       matchWorkOns.forEach((metric) => {
@@ -2565,7 +2709,7 @@ export default function App() {
           <div className="module-stack premium-module-stack">
             <ModuleCard number="01" title="Match Analysis" status="Available" description="Tag attack, defence, kicking, set piece and maul events. Export professional coach reports." action="Open Module →" onClick={() => setView("analysis")} />
             <ModuleCard number="02" title="Auto Clip Creator" status="Available" description="Turn tagged moments into organised MP4 coaching compilations from the raw match footage." action="Launch Module →" onClick={() => setView("compilations")} highlight />
-            <ModuleCard number="03" title="Attack Lab" status="In Development" description="Design, animate and test attacking ideas under the Rugby Analysis Suite brand." action="Preview →" onClick={() => setView("plays")} />
+            <ModuleCard number="03" title="AI Match Analysis" status="Beta" description="Scan match footage, review AI-detected rugby events and send approved moments into the full analysis workflow." action="Open Beta →" onClick={() => setView("plays")} />
           </div>
         </section>
         <NoticeToast />
@@ -2578,7 +2722,7 @@ export default function App() {
       <button className={`module-card ${props.highlight ? "highlight" : ""}`} onClick={props.onClick}>
         <div className="module-card-top">
           <span className="module-number">{props.number}</span>
-          <span className={props.status === "Available" ? "status available" : "status soon"}>{props.status}</span>
+          <span className={props.status === "Available" ? "status available" : props.status === "Beta" ? "status beta" : "status soon"}>{props.status}</span>
         </div>
         <h3>{props.title}</h3>
         <p>{props.description}</p>
@@ -2623,6 +2767,9 @@ export default function App() {
           <button className="secondary-btn" onClick={() => projectInputRef.current?.click()}>Open Match</button>
           <input ref={projectInputRef} type="file" hidden accept=".ras,application/json" onChange={(event) => openProject(event.target.files?.[0])} />
           <button className="primary-btn" onClick={saveProject}>Save Match</button>
+          <button className="secondary-btn cloud-upload-btn" disabled={!rawVideoPath || isCloudUploading || Boolean(cloudObjectKey)} onClick={() => cloudConfigured ? uploadCurrentVideoToCloud() : setShowCloudSetup(true)}>
+            {cloudObjectKey ? "Cloud Verified" : isCloudUploading ? `Uploading ${cloudUploadProgress}%` : cloudConfigured ? "Store Footage in Cloud" : "Connect Cloud Storage"}
+          </button>
           <button className="danger-btn" onClick={clearWorkspace}>Clear Match</button>
           <button className="secondary-btn" onClick={() => exportPDFReport()}>Export PDF</button>
           <button className="secondary-btn" onClick={() => setShowMatchCheck(true)}>Match Check</button>
@@ -3223,9 +3370,454 @@ export default function App() {
     );
   }
 
-  function PlaysPage() {
+  async function beginAIScan() {
+    if (!rawVideoPath) {
+      notify("Match Footage Required", "Load a match video before starting AI analysis.", "warning");
+      return;
+    }
+    if (!matchName || !opposition || !aiTeamColour || !aiOppositionColour) {
+      notify("Match Context Required", "Enter both teams and both jersey colours before starting the AI scan.", "warning");
+      return;
+    }
+    setAiScanStatus("scanning");
+    setAiScanProgress(2);
+    setAiScanStage("Starting experimental full-match classifier");
+    setAiReviewEvents([]);
+    setAiComparison(null);
+    setAiGroundTruth(null);
+    try {
+      const result = await window.electronAPI.runAIScan({ videoPath: rawVideoPath });
+      if (!result.success) {
+        setAiScanStatus("ready");
+        setAiScanProgress(0);
+        notify("AI Scan Failed", result.message || "The match could not be analysed.", "error");
+        return;
+      }
+      const startedAt = Date.now();
+      setAiReviewEvents((result.detections || []).map((event, index) => ({ ...event, id: startedAt + index })));
+      setAiScanStatus("review");
+      setAiScanProgress(100);
+      setAiScanStage(`${result.framesScanned || 0} frames scanned`);
+      notify("Experimental Scan Complete", `${result.detections?.length || 0} possible rugby events found for analyst review.`, "success");
+    } catch (error) {
+      setAiScanStatus("ready");
+      setAiScanProgress(0);
+      notify("AI Scan Failed", error instanceof Error ? error.message : "The match could not be analysed.", "error");
+    }
+  }
+
+  function compareAIGroundTruth(file?: File) {
+    if (!file || aiScanStatus !== "review") return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || "{}"));
+        const truth: EventLog[] = ((Array.isArray(data.events) ? data.events : []) as EventLog[]).filter((event) => event.event && Number.isFinite(Number(event.seconds)));
+        if (!truth.length) throw new Error("No valid events");
+        const used = new Set<number>();
+        let correct = 0;
+        let wrongLabel = 0;
+        let falseDetections = 0;
+        const timingErrors: number[] = [];
+        const normaliseLabel = (value: string) => value.trim().toLowerCase();
+        for (const prediction of aiReviewEvents) {
+          const candidates = truth
+            .map((event, index) => ({ event, index, distance: Math.abs(event.seconds - prediction.seconds) }))
+            .filter((candidate) => !used.has(candidate.index) && candidate.distance <= 10)
+            .sort((a, b) => a.distance - b.distance);
+          const exact = candidates.find((candidate) => normaliseLabel(candidate.event.event) === normaliseLabel(prediction.event));
+          if (exact) {
+            correct += 1;
+            timingErrors.push(exact.distance);
+            used.add(exact.index);
+          } else if (candidates[0]) {
+            wrongLabel += 1;
+            timingErrors.push(candidates[0].distance);
+            used.add(candidates[0].index);
+          } else {
+            falseDetections += 1;
+          }
+        }
+        setAiComparison({
+          correct,
+          wrongLabel,
+          falseDetections,
+          missed: Math.max(0, truth.length - used.size),
+          meanTimingError: timingErrors.length ? timingErrors.reduce((sum, value) => sum + value, 0) / timingErrors.length : 0,
+          totalGroundTruth: truth.length,
+        });
+        setAiGroundTruth({ name: file.name, events: truth });
+        notify("Blind Test Compared", `${correct} exact event matches found against ${truth.length} manual events.`, "info");
+      } catch (_error) {
+        notify("Comparison Failed", "Choose the completed .ras file for this exact raw match.", "error");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function learnFromAIGroundTruth() {
+    if (!aiGroundTruth || !rawVideoPath) return;
+    setIsLearningGroundTruth(true);
+    try {
+      const result = await window.electronAPI.buildTrainingDataset({
+        videoPath: rawVideoPath,
+        videoName: rawVideoName,
+        projectName: aiGroundTruth.name,
+        matchName,
+        opposition,
+        teamColour: aiTeamColour,
+        direction: aiDirection,
+        camera: aiCamera,
+        events: aiGroundTruth.events,
+      });
+      if (!result.success) {
+        notify("Learning Import Failed", result.message || "The ground-truth match could not be imported.", "error");
+        return;
+      }
+      setAiScanStage("Retraining with expanded ground truth");
+      const retrained = await window.electronAPI.retrainAIModel();
+      notify(retrained.success ? "Model Retrained" : "Examples Saved • Retraining Failed", retrained.success ? `${result.clips || 0} trusted examples were learned. The model now uses ${retrained.frames || 0} training frames across ${retrained.classes || 0} classes.` : retrained.message || "Trusted examples were saved, but the model could not be retrained.", retrained.success ? "success" : "warning");
+    } finally {
+      setIsLearningGroundTruth(false);
+    }
+  }
+
+  function reviewAIEvent(id: number, status: "accepted" | "rejected") {
+    setAiReviewEvents((current) => current.map((event) => event.id === id ? { ...event, reviewStatus: status } : event));
+  }
+
+  function sendApprovedAIEvents() {
+    const approved = aiReviewEvents.filter((event) => event.reviewStatus === "accepted");
+    if (!approved.length) {
+      notify("Nothing Approved", "Accept at least one AI suggestion before sending events to Match Analysis.", "warning");
+      return;
+    }
+    const existingIds = new Set(events.map((event) => event.id));
+    const cleanEvents = approved
+      .filter((event) => !existingIds.has(event.id))
+      .map(({ confidence: _confidence, explanation: _explanation, reviewStatus: _reviewStatus, ...event }) => event);
+    setEvents((current) => [...current, ...cleanEvents].sort((a, b) => a.seconds - b.seconds));
+    notify("Events Added", `${cleanEvents.length} approved AI event${cleanEvents.length === 1 ? "" : "s"} added to Match Analysis.`, "success");
+  }
+
+  async function chooseTrainingVideo() {
+    const file = await window.electronAPI.selectVideo();
+    if (!file) return;
+    const probe = document.createElement("video");
+    probe.preload = "metadata";
+    probe.onloadedmetadata = () => {
+      setTrainingVideo({ ...file, duration: Number.isFinite(probe.duration) ? probe.duration : 0 });
+      probe.removeAttribute("src");
+      probe.load();
+    };
+    probe.onerror = () => {
+      setTrainingVideo({ ...file, duration: 0 });
+      notify("Video Metadata Unavailable", "The footage was linked, but its duration could not be checked in the preview player.", "warning");
+    };
+    probe.src = file.url;
+  }
+
+  function importTrainingProject(file?: File) {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(String(reader.result || "{}"));
+        if (!Array.isArray(data.events)) throw new Error("Missing events");
+        const validEvents = data.events.filter((event: EventLog) => Number.isFinite(Number(event.seconds)) && event.event);
+        setTrainingProject({
+          name: file.name,
+          events: validEvents,
+          matchName: data.matchName || "",
+          opposition: data.opposition || "",
+        });
+        notify("Analysis Imported", `${validEvents.length} tagged events are ready for training validation.`, "success");
+      } catch (_error) {
+        setTrainingProject(null);
+        notify("Invalid Training File", "Choose a valid Rugby Analysis Suite .ras project.", "error");
+      }
+    };
+    reader.readAsText(file);
+  }
+
+  async function buildTrainingDataset() {
+    if (!trainingVideo || !trainingProject || !trainingPermission) return;
+    setIsBuildingTrainingDataset(true);
+    setTrainingProgress({ completed: 0, total: trainingProject.events.length, percent: 0 });
+    try {
+      const result = await window.electronAPI.buildTrainingDataset({
+        videoPath: trainingVideo.path,
+        videoName: trainingVideo.name,
+        projectName: trainingProject.name,
+        matchName: trainingProject.matchName,
+        opposition: trainingProject.opposition,
+        teamColour: trainingTeamColour,
+        direction: trainingDirection,
+        camera: trainingCamera,
+        events: trainingProject.events,
+      });
+      notify(result.success ? "Training Dataset Created" : "Dataset Build Failed", result.success ? `${result.clips || 0} labelled clips were saved to the local AI Training Library.` : result.message || "Training clips could not be extracted.", result.success ? "success" : "error");
+      if (result.success) await loadTrainingDatasets(true, result.datasetId);
+    } catch (error) {
+      notify("Dataset Build Failed", error instanceof Error ? error.message : "Training clips could not be extracted.", "error");
+    } finally {
+      setIsBuildingTrainingDataset(false);
+      setTrainingProgress(null);
+    }
+  }
+
+  async function loadTrainingDatasets(openReview = false, preferredId?: string) {
+    if (openReview) setTrainingLibraryMode("review");
+    setIsLoadingTrainingDatasets(true);
+    try {
+      if (!window.electronAPI?.listTrainingDatasets) throw new Error("The desktop app needs to restart before Dataset Review can access saved matches.");
+      const result = await window.electronAPI.listTrainingDatasets();
+      if (!result.success) throw new Error(result.message || "Training datasets could not be loaded.");
+      const datasets = result.datasets || [];
+      setTrainingDatasets(datasets);
+      const selected = datasets.find((dataset) => dataset.id === preferredId) || datasets.find((dataset) => dataset.id === selectedTrainingDatasetId) || datasets[0];
+      if (selected) {
+        setSelectedTrainingDatasetId(selected.id);
+        setActiveTrainingExampleId(selected.examples[0]?.id ?? null);
+      }
+      if (!datasets.length) notify("No Saved Datasets", "Complete training extraction before opening Dataset Review.", "info");
+    } catch (error) {
+      notify("Library Unavailable", error instanceof Error ? error.message : "Training datasets could not be loaded.", "error");
+    } finally {
+      setIsLoadingTrainingDatasets(false);
+    }
+  }
+
+  async function updateTrainingReview(datasetId: string, exampleId: number, reviewStatus: TrainingExample["reviewStatus"], correctedEvent?: string) {
+    const result = await window.electronAPI.updateTrainingExample({ datasetId, exampleId, reviewStatus, correctedEvent });
+    if (!result.success) {
+      notify("Review Not Saved", result.message || "This training decision could not be saved.", "error");
+      return;
+    }
+    setTrainingDatasets((datasets) => datasets.map((dataset) => dataset.id !== datasetId ? dataset : {
+      ...dataset,
+      examples: dataset.examples.map((example) => example.id !== exampleId ? example : { ...example, reviewStatus, ...(correctedEvent?.trim() ? { correctedEvent: correctedEvent.trim() } : {}) }),
+    }));
+  }
+
+  function TrainingDatasetReview() {
+    if (isLoadingTrainingDatasets) return <section className="panel training-summary-card"><div className="ai-empty-review"><strong>Loading saved training matches…</strong><p>Reading dataset manifests and connecting extracted clips.</p></div></section>;
+    const selectedDataset = trainingDatasets.find((dataset) => dataset.id === selectedTrainingDatasetId) || trainingDatasets[0];
+    if (!selectedDataset) return <section className="panel training-summary-card"><div className="ai-empty-review"><strong>No completed datasets found</strong><p>Import and extract a training match before inspecting training data.</p><button className="primary-btn" onClick={() => setTrainingLibraryMode("import")}>Import Training Match</button></div></section>;
+    const categories = Array.from(new Set(selectedDataset.examples.map((example) => example.category || "other"))).sort();
+    const eventNames = Array.from(new Set(selectedDataset.examples.map((example) => example.correctedEvent || example.event))).sort();
+    const filtered = selectedDataset.examples.filter((example) =>
+      (trainingCategoryFilter === "all" || (example.category || "other") === trainingCategoryFilter)
+      && (trainingEventFilter === "all" || (example.correctedEvent || example.event) === trainingEventFilter)
+      && (trainingReviewFilter === "all" || (trainingReviewFilter === "issues" ? ["rejected", "duplicate", "unclear"].includes(example.reviewStatus) : example.reviewStatus === trainingReviewFilter))
+    );
+    const active = filtered.find((example) => example.id === activeTrainingExampleId) || filtered[0];
+    const trusted = selectedDataset.examples.filter((example) => ["trusted", "approved"].includes(example.reviewStatus)).length;
+    const issues = selectedDataset.examples.filter((example) => ["rejected", "duplicate", "unclear"].includes(example.reviewStatus)).length;
+    const move = (currentId: number, amount: number) => {
+      const index = filtered.findIndex((example) => example.id === currentId);
+      setActiveTrainingExampleId(filtered[Math.max(0, Math.min(filtered.length - 1, index + amount))]?.id ?? null);
+    };
+    const decide = async (status: TrainingExample["reviewStatus"]) => {
+      if (!active) return;
+      await updateTrainingReview(selectedDataset.id, active.id, status, active.correctedEvent);
+      move(active.id, 1);
+    };
+    const activeIndex = active ? filtered.findIndex((example) => example.id === active.id) : -1;
     return (
-      <main className="ras-shell center-shell"><div className="grid-bg" /><div className="coming-card"><img src={logoSrc} alt="Rugby Analysis Suite" /><p className="home-kicker">In Development</p><h1>Play Creator</h1><p>Design attacking plays, strike moves and tactical animations. This module is coming soon.</p><button className="primary-btn" onClick={() => setView("home")}>← Back Home</button></div><NoticeToast /></main>
+      <section className="dataset-review">
+        <header className="dataset-inspector-head">
+          <div><p className="eyebrow">Training Data Inspector</p><h2>{selectedDataset.team || "Team"} vs {selectedDataset.opposition || "Opposition"}</h2><p>{selectedDataset.videoName} • Manual `.ras` labels are trusted automatically</p></div>
+          <label><span>Saved match</span><select value={selectedDataset.id} onChange={(event) => { setSelectedTrainingDatasetId(event.target.value); setActiveTrainingExampleId(null); }} >{trainingDatasets.map((dataset) => <option value={dataset.id} key={dataset.id}>{dataset.team || "Team"} vs {dataset.opposition || "Opposition"}</option>)}</select></label>
+          <div className="dataset-review-totals"><strong>{trusted}</strong><span>trusted clips</span><strong>{issues}</strong><span>flagged issues</span></div>
+        </header>
+        <div className="dataset-filter-flow">
+          <div className="dataset-category-pills"><span>1. Category</span><button className={trainingCategoryFilter === "all" ? "active" : ""} onClick={() => { setTrainingCategoryFilter("all"); setActiveTrainingExampleId(null); }}>All</button>{categories.map((category) => <button className={trainingCategoryFilter === category ? "active" : ""} key={category} onClick={() => { setTrainingCategoryFilter(category); setTrainingEventFilter("all"); setActiveTrainingExampleId(null); }}>{titleCase(category)}</button>)}</div>
+          <div className="dataset-secondary-filters"><label><span>2. Event</span><select value={trainingEventFilter} onChange={(event) => { setTrainingEventFilter(event.target.value); setActiveTrainingExampleId(null); }}><option value="all">All event labels</option>{eventNames.map((event) => <option value={event} key={event}>{event}</option>)}</select></label><label><span>3. Show</span><select value={trainingReviewFilter} onChange={(event) => { setTrainingReviewFilter(event.target.value); setActiveTrainingExampleId(null); }}><option value="all">All clips</option><option value="trusted">Trusted only</option><option value="issues">Flagged issues</option><option value="duplicate">Duplicates</option><option value="unclear">Unclear</option></select></label><button onClick={() => { setTrainingCategoryFilter("all"); setTrainingEventFilter("all"); setTrainingReviewFilter("all"); setActiveTrainingExampleId(null); }}>Clear filters</button></div>
+        </div>
+        <div className="dataset-review-layout">
+          <aside className="dataset-example-list">
+            <div><strong>{filtered.length} clips</strong><small>Select a clip to inspect</small></div>
+            {filtered.map((example, index) => <button className={`${example.id === active?.id ? "active" : ""} ${example.reviewStatus}`} key={example.id} onClick={() => setActiveTrainingExampleId(example.id)}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{example.correctedEvent || example.event}</strong><small>{example.originalTime} • {example.zone || "No zone"}</small></div><i>{["trusted", "approved"].includes(example.reviewStatus) ? "✓" : "!"}</i></button>)}
+          </aside>
+          <section className="panel dataset-review-player">
+            {active ? <>
+              <div className="dataset-video-frame"><video key={active.clipUrl} src={active.clipUrl} controls autoPlay /></div>
+              <div className="dataset-clip-navigation"><button disabled={activeIndex <= 0} onClick={() => move(active.id, -1)}>← Previous</button><span>Clip {activeIndex + 1} of {filtered.length}</span><button disabled={activeIndex >= filtered.length - 1} onClick={() => move(active.id, 1)}>Next →</button></div>
+              <div className="dataset-example-meta"><div><p className="eyebrow">Inspecting Training Clip</p><h2>{active.correctedEvent || active.event}</h2><p>{active.originalTime} • {active.zone || "Zone not tagged"} • source timestamp {formatTime(active.timestamp)}</p></div><span className={`review-status ${active.reviewStatus}`}>{["trusted", "approved"].includes(active.reviewStatus) ? "Trusted manual label" : active.reviewStatus}</span></div>
+              <label className="dataset-correct-label"><span>Correct event label</span><input key={`${active.id}-${active.correctedEvent || active.event}`} defaultValue={active.correctedEvent || active.event} onBlur={(event) => { const value = event.target.value.trim(); if (value && value !== (active.correctedEvent || active.event)) void updateTrainingReview(selectedDataset.id, active.id, active.reviewStatus, value); }} /></label>
+              <div className="dataset-decision-actions">
+                {!["trusted", "approved"].includes(active.reviewStatus) && <button className="undo-review-btn" onClick={() => void decide("trusted")}>↶ Clear Issue</button>}
+                <button onClick={() => void decide("rejected")}>Broken / Wrong Clip</button>
+                <button onClick={() => void decide("duplicate")}>Mark Duplicate</button>
+                <button onClick={() => void decide("unclear")}>Mark Unclear</button>
+                <button className="primary-btn" onClick={() => move(active.id, 1)}>Looks Good • Next</button>
+              </div>
+            </> : <div className="ai-empty-review"><strong>No examples match these filters</strong><p>Change the event or review-status filter to continue.</p></div>}
+          </section>
+        </div>
+      </section>
+    );
+  }
+
+  function TrainingLibraryPanel() {
+    const importedEvents = trainingProject?.events || [];
+    const latestTimestamp = Math.max(0, ...importedEvents.map((event) => Number(event.seconds) || 0));
+    const timelineValid = Boolean(trainingVideo?.duration && latestTimestamp <= trainingVideo.duration + 2);
+    const eventCounts = importedEvents.reduce<Record<string, number>>((counts, event) => {
+      counts[event.event] = (counts[event.event] || 0) + 1;
+      return counts;
+    }, {});
+    const groups = Object.entries(eventCounts).sort((a, b) => b[1] - a[1]);
+    const ready = Boolean(trainingVideo && trainingProject && timelineValid && trainingPermission);
+    const previewClips = importedEvents.slice(0, 12).map((event) => ({
+      ...event,
+      clipStart: Math.max(0, event.seconds - 7),
+      clipEnd: trainingVideo?.duration ? Math.min(trainingVideo.duration, event.seconds + 4) : event.seconds + 4,
+    }));
+    return (
+      <section className="training-library">
+        <div className="training-library-switch">
+          <button className={trainingLibraryMode === "import" ? "active" : ""} onClick={() => setTrainingLibraryMode("import")}>Import Match</button>
+          <button className={trainingLibraryMode === "review" ? "active" : ""} onClick={() => { setTrainingLibraryMode("review"); void loadTrainingDatasets(true); }}>Inspect Training Data</button>
+        </div>
+        {trainingLibraryMode === "review" ? TrainingDatasetReview() : <>
+        <div className="training-import-grid">
+          <section className="panel training-source-card">
+            <p className="eyebrow">Step 1 • Pair the source files</p>
+            <h2>Import an Analysed Match</h2>
+            <p className="muted">The original footage stays in its current folder. The library stores its location and builds smaller labelled examples from the matching analysis.</p>
+            <div className={`training-file ${trainingVideo ? "ready" : ""}`}>
+              <span>{trainingVideo ? "✓" : "1"}</span><div><strong>{trainingVideo?.name || "Original match footage"}</strong><small>{trainingVideo ? `${trainingVideo.duration ? formatTime(trainingVideo.duration) : "Duration unavailable"} • referenced in place` : "MP4, MOV, AVI, MKV or M4V"}</small></div><button onClick={chooseTrainingVideo}>{trainingVideo ? "Change" : "Choose Video"}</button>
+            </div>
+            <div className={`training-file ${trainingProject ? "ready" : ""}`}>
+              <span>{trainingProject ? "✓" : "2"}</span><div><strong>{trainingProject?.name || "Matching .ras analysis"}</strong><small>{trainingProject ? `${trainingProject.events.length} valid tagged events` : "Must have been created from this exact video timeline"}</small></div><button onClick={() => trainingProjectInputRef.current?.click()}>{trainingProject ? "Change" : "Choose .ras"}</button>
+              <input ref={trainingProjectInputRef} hidden type="file" accept=".ras,application/json" onChange={(event) => { importTrainingProject(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+            </div>
+            <div className="training-validation">
+              <div className={trainingVideo ? "pass" : ""}><span>{trainingVideo ? "✓" : "○"}</span> Footage linked</div>
+              <div className={trainingProject ? "pass" : ""}><span>{trainingProject ? "✓" : "○"}</span> Analysis readable</div>
+              <div className={timelineValid ? "pass" : trainingVideo && trainingProject ? "fail" : ""}><span>{timelineValid ? "✓" : trainingVideo && trainingProject ? "!" : "○"}</span> Timeline fits footage</div>
+            </div>
+          </section>
+
+          <section className="panel training-details-card">
+            <p className="eyebrow">Step 2 • Match context</p>
+            <h2>Describe the Footage</h2>
+            <div className="training-fields">
+              <label><span>Your team</span><input value={trainingProject?.matchName || ""} readOnly placeholder="Read from .ras" /></label>
+              <label><span>Opposition</span><input value={trainingProject?.opposition || ""} readOnly placeholder="Read from .ras" /></label>
+              <label><span>Your jersey colour</span><input value={trainingTeamColour} onChange={(event) => setTrainingTeamColour(event.target.value)} placeholder="e.g. Navy blue" /></label>
+              <label><span>First-half direction</span><select value={trainingDirection} onChange={(event) => setTrainingDirection(event.target.value)}><option value="unknown">Not confirmed</option><option value="left-right">Left to right</option><option value="right-left">Right to left</option></select></label>
+              <label><span>Camera setup</span><select value={trainingCamera} onChange={(event) => setTrainingCamera(event.target.value)}><option value="single-wide">Single wide camera</option><option value="broadcast">Broadcast / multiple cameras</option><option value="phone">Phone or handheld</option><option value="other">Other</option></select></label>
+            </div>
+            <label className="training-consent"><input type="checkbox" checked={trainingPermission} onChange={(event) => setTrainingPermission(event.target.checked)} /><span><strong>Local AI training/testing permitted</strong><small>I confirm this footage may be processed locally to develop and test the rugby detection system.</small></span></label>
+            {isBuildingTrainingDataset && <div className="training-render-progress"><div><span>{trainingProgress?.event || "Preparing dataset"}</span><strong>{Math.round(trainingProgress?.percent || 0)}%</strong></div><i><b style={{ width: `${trainingProgress?.percent || 0}%` }} /></i><small>{trainingProgress?.completed || 0} of {trainingProgress?.total || importedEvents.length} clips extracted</small></div>}
+            <button className="primary-btn training-build-btn" disabled={!ready || isBuildingTrainingDataset} onClick={buildTrainingDataset}>{isBuildingTrainingDataset ? "Extracting Training Clips…" : "Add Match to Training Library"}</button>
+          </section>
+        </div>
+
+        <section className="panel training-summary-card">
+          <div className="section-head"><div><p className="eyebrow">Dataset Preview</p><h2>{trainingProject ? `${trainingProject.matchName || "Team"} vs ${trainingProject.opposition || "Opposition"}` : "Waiting for an analysed match"}</h2></div><span>{importedEvents.length} examples</span></div>
+          {groups.length ? <div className="training-event-counts">{groups.map(([event, count]) => <div key={event}><strong>{count}</strong><span>{event}</span></div>)}</div> : <div className="ai-empty-review"><strong>No event data imported</strong><p>Select a matching video and .ras file to see exactly what this match can teach the AI.</p></div>}
+        </section>
+
+        {previewClips.length > 0 && <section className="panel training-clips-card">
+          <div className="section-head"><div><p className="eyebrow">Proposed Training Clips</p><h2>Timestamp Windows</h2></div><span>Showing first {previewClips.length}</span></div>
+          <div className="training-clip-list">{previewClips.map((clip) => <button key={clip.id} onClick={() => { if (trainingVideo) { setRawVideoPath(trainingVideo.path); setRawVideoName(trainingVideo.name); setRawVideoUrl(trainingVideo.url); setPlaybackVideoUrl(trainingVideo.url); window.setTimeout(() => seekVideo(clip.seconds), 0); } }}><span>{clip.time}</span><div><strong>{clip.event}</strong><small>{clip.zone || "Zone not tagged"} • {formatTime(clip.clipStart)} to {formatTime(clip.clipEnd)}</small></div><i>Preview →</i></button>)}</div>
+        </section>}
+        </>}
+      </section>
+    );
+  }
+
+  function PlaysPage() {
+    const pending = aiReviewEvents.filter((event) => event.reviewStatus === "pending");
+    const accepted = aiReviewEvents.filter((event) => event.reviewStatus === "accepted");
+    const detectionGroups = [
+      ["Attack", "Possession sequences, phases, gainline, ruck speed and outcomes"],
+      ["Set Piece", "Scrums, lineouts, launch types and retained or lost possession"],
+      ["Kicking", "Exits, contestables, clearances, outcomes and end zones"],
+      ["Defence", "Tackles, missed tackles, turnovers, penalties and tries conceded"],
+      ["Maul & Restart", "Maul outcomes, kick-offs, 22 drop-outs and receiving outcomes"],
+    ];
+    return (
+      <main className="ras-shell ai-shell">
+        <div className="grid-bg" />
+        <Topbar moduleTitle="AI Match Analysis • Beta" />
+        <section className="analysis-toolbar ai-toolbar">
+          <button className="home-btn" onClick={() => setView("home")}>← Home</button>
+          <button className="secondary-btn" onClick={chooseMatchFootage}>{rawVideoPath ? "Change Footage" : "Load Match Footage"}</button>
+          <button className="primary-btn" disabled={aiScanStatus === "scanning"} onClick={beginAIScan}>{aiScanStatus === "scanning" ? "Scanning Match…" : "Run AI Match Scan"}</button>
+          <button className="secondary-btn" disabled={aiScanStatus !== "review"} onClick={() => aiGroundTruthInputRef.current?.click()}>Compare Hidden .ras</button>
+          <input ref={aiGroundTruthInputRef} hidden type="file" accept=".ras,application/json" onChange={(event) => { compareAIGroundTruth(event.target.files?.[0]); event.currentTarget.value = ""; }} />
+          <button className="secondary-btn" onClick={() => setView("analysis")}>Open Manual Analysis</button>
+        </section>
+
+        <section className="ai-beta-banner">
+          <div><span className="ai-beta-pill">BETA</span><p className="eyebrow">Human-reviewed rugby intelligence</p><h1>Let AI prepare the match.<br /><em>You make the call.</em></h1></div>
+          <p>AI suggestions remain isolated here until you approve them. Manual tags, reports and compilation tools are never changed automatically.</p>
+        </section>
+
+        <nav className="ai-module-tabs">
+          <button className={aiTab === "analyse" ? "active" : ""} onClick={() => setAiTab("analyse")}><span>01</span><div><strong>Analyse New Match</strong><small>Scan unanalysed footage</small></div></button>
+          <button className={aiTab === "training" ? "active" : ""} onClick={() => setAiTab("training")}><span>02</span><div><strong>Training Library</strong><small>Import video + .ras pairs</small></div></button>
+        </nav>
+
+        {aiTab === "training" ? TrainingLibraryPanel() : <>
+        <section className="match-setup ai-match-setup">
+          <input placeholder="Your Team" value={matchName} onChange={(event) => setMatchName(event.target.value)} />
+          <input placeholder="Opposition" value={opposition} onChange={(event) => setOpposition(event.target.value)} />
+          <input placeholder="Competition" value={competition} onChange={(event) => setCompetition(event.target.value)} />
+          <input placeholder="Your jersey colour" value={aiTeamColour} onChange={(event) => setAiTeamColour(event.target.value)} />
+          <input placeholder="Opposition jersey colour" value={aiOppositionColour} onChange={(event) => setAiOppositionColour(event.target.value)} />
+          <label className="select-field"><span>First-half direction</span><select value={aiDirection} onChange={(event) => setAiDirection(event.target.value)}><option value="unknown">Not confirmed</option><option value="left-right">Left to right</option><option value="right-left">Right to left</option></select></label>
+          <label className="select-field"><span>Camera setup</span><select value={aiCamera} onChange={(event) => setAiCamera(event.target.value)}><option value="single-wide">Single wide camera</option><option value="broadcast">Broadcast / multiple cameras</option><option value="phone">Phone or handheld</option></select></label>
+        </section>
+
+        <section className="ai-workspace">
+          <div className="ai-video-column">
+            <VideoPlayer videoRef={videoRef} rawVideoPath={rawVideoPath} playbackVideoUrl={playbackVideoUrl} rawVideoUrl={rawVideoUrl} rawVideoName={rawVideoName} isOptimisingVideo={isOptimisingVideo} playbackRate={playbackRate} onLoadVideo={chooseMatchFootage} onError={handleVideoPlaybackError} onSeek={seekVideo} onSpeedChange={changePlaybackRate} />
+            <section className="panel ai-scan-card">
+              <div className="section-head"><div><p className="eyebrow">Experimental Full-Match Classifier</p><h2>{aiScanStage}</h2></div><span>{aiScanProgress}%</span></div>
+              <div className="ai-progress"><i style={{ width: `${aiScanProgress}%` }} /></div>
+              <div className="ai-scan-steps"><span className={aiScanProgress >= 12 ? "active" : ""}>Video preparation</span><span className={aiScanProgress >= 45 ? "active" : ""}>Rugby event detection</span><span className={aiScanProgress >= 75 ? "active" : ""}>Confidence scoring</span><span className={aiScanProgress === 100 ? "active" : ""}>Analyst review</span></div>
+              <button className="primary-btn ai-scan-main-btn" disabled={aiScanStatus === "scanning"} onClick={beginAIScan}>{aiScanStatus === "scanning" ? `Scanning Match • ${aiScanProgress}%` : aiScanStatus === "review" ? "Run Full AI Scan Again" : "Start Full AI Match Scan"}</button>
+            </section>
+          </div>
+
+          <div className="ai-review-column">
+            <section className="panel ai-review-card">
+              <div className="section-head"><div><p className="eyebrow">Review Queue</p><h2>AI Suggestions</h2></div><span>{pending.length} pending</span></div>
+              <div className="ai-review-summary"><div><strong>{aiReviewEvents.length}</strong><span>Detected</span></div><div><strong>{accepted.length}</strong><span>Approved</span></div><div><strong>{pending.length}</strong><span>Needs review</span></div></div>
+              {aiReviewEvents.length === 0 ? <div className="ai-empty-review"><strong>No AI suggestions yet</strong><p>Load footage and run a scan. Detected moments will appear here with timestamps, confidence and short video previews.</p></div> :
+                <div className="ai-review-list">{aiReviewEvents.map((event) => <article className={`ai-review-event ${event.reviewStatus}`} key={event.id}><div><span>{event.time}</span><strong>{event.event}</strong><small>{event.zone} • {Math.round(event.confidence * 100)}% confidence</small><p>{event.explanation}</p></div><div className="ai-review-actions"><button onClick={() => seekVideo(event.seconds)}>Preview</button><button className="negative" onClick={() => reviewAIEvent(event.id, "rejected")}>Reject</button><button className="positive" onClick={() => reviewAIEvent(event.id, "accepted")}>Accept</button></div></article>)}</div>}
+              <button className="primary-btn ai-send-approved" disabled={!accepted.length} onClick={sendApprovedAIEvents}>Send Approved Events to Match Analysis</button>
+            </section>
+          </div>
+        </section>
+
+        {aiComparison && <section className="panel ai-comparison-card">
+          <div className="section-head"><div><p className="eyebrow">Blind-Test Comparison</p><h2>AI Predictions vs Manual Ground Truth</h2></div><span>{aiGroundTruth?.name}</span></div>
+          <div className="ai-comparison-grid">
+            <div className="positive"><strong>{aiComparison.correct}</strong><span>Exact event matches</span></div>
+            <div><strong>{aiComparison.wrongLabel}</strong><span>Right time, wrong label</span></div>
+            <div className="negative"><strong>{aiComparison.falseDetections}</strong><span>False detections</span></div>
+            <div className="negative"><strong>{aiComparison.missed}</strong><span>Manual events missed</span></div>
+            <div><strong>{aiComparison.meanTimingError.toFixed(1)}s</strong><span>Average timing error</span></div>
+            <div><strong>{aiComparison.totalGroundTruth}</strong><span>Ground-truth events</span></div>
+          </div>
+          {isLearningGroundTruth && <div className="training-render-progress"><div><span>{trainingProgress?.event || "Building trusted training examples"}</span><strong>{Math.round(trainingProgress?.percent || 0)}%</strong></div><i><b style={{ width: `${trainingProgress?.percent || 0}%` }} /></i></div>}
+          <button className="primary-btn" disabled={isLearningGroundTruth} onClick={learnFromAIGroundTruth}>{isLearningGroundTruth ? "Learning From Ground Truth…" : "Add Correct .ras to Training Library"}</button>
+        </section>}
+
+        <section className="panel ai-coverage-card">
+          <div className="section-head"><div><p className="eyebrow">Manual Analysis Coverage</p><h2>Built Around Your Existing Workflow</h2></div><span>Shared event system</span></div>
+          <div className="ai-coverage-grid">{detectionGroups.map(([title, description]) => <article key={title}><span>✓</span><div><strong>{title}</strong><p>{description}</p></div></article>)}</div>
+        </section>
+        </>}
+        <NoticeToast />
+      </main>
     );
   }
 
@@ -3239,7 +3831,9 @@ export default function App() {
           ? { eyebrow: "Clip Engine", title: "Generating test clip", detail: "Preparing a short quality-check export", progress: null }
           : isOptimisingVideo
             ? { eyebrow: "Video Engine", title: "Optimising match footage", detail: "Creating a smooth playback copy without changing the original", progress: null }
-            : null;
+            : isCloudUploading
+              ? { eyebrow: "Private Cloud", title: "Uploading match footage", detail: `${cloudUploadProgress}% complete • safe to retry if interrupted`, progress: cloudUploadProgress }
+              : null;
     if (!activity) return null;
     return <div className="activity-backdrop" role="status" aria-live="polite"><div className="activity-card"><div className="activity-rings"><i /><i /><img src={logoSrc} alt="" /></div><p className="eyebrow">{activity.eyebrow}</p><h2>{activity.title}</h2><p>{activity.detail}</p>{activity.progress !== null ? <div className="activity-progress"><span style={{ width: `${activity.progress}%` }} /></div> : <div className="activity-loader"><span /><span /><span /></div>}{isGeneratingCompilation && <div className="activity-steps">{clipStages.map((stage, index) => <span className={index < clipStage ? "done" : index === clipStage ? "active" : ""} key={stage}>{index < clipStage ? "✓" : index === clipStage ? "●" : "○"} {stage}</span>)}</div>}</div></div>;
   }
@@ -3251,6 +3845,7 @@ export default function App() {
 
   function ReliabilityModals() {
     return <>
+      {showCloudSetup && <div className="reliability-modal-backdrop"><section className="reliability-modal cloud-setup-modal"><button className="notice-close" onClick={() => setShowCloudSetup(false)}>×</button><p className="eyebrow">Private Cloud Storage</p><h2>Connect Rugby Analysis Suite</h2><p>Enter the bucket-scoped Cloudflare credentials once. Windows encrypts them locally; they are never placed in a match file or report.</p><label><span>Access Key ID</span><input autoComplete="off" value={cloudAccessKey} onChange={(event) => setCloudAccessKey(event.target.value)} /></label><label><span>Secret Access Key</span><input type="password" autoComplete="new-password" value={cloudSecretKey} onChange={(event) => setCloudSecretKey(event.target.value)} /></label><div className="cloud-retention-note"><strong>60-day cost control</strong><span>Only raw footage expires automatically. Match data, reports and clips remain untouched.</span></div><div className="modal-actions"><button className="secondary-btn" onClick={() => setShowCloudSetup(false)}>Cancel</button><button className="primary-btn" disabled={!cloudAccessKey.trim() || !cloudSecretKey.trim()} onClick={connectCloudStorage}>Verify & Connect</button></div></section></div>}
       {recoveryCandidate && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Recovered Session</p><h2>{recoveryCandidate.saved.matchName || "Previous match"}{recoveryCandidate.saved.opposition ? ` vs ${recoveryCandidate.saved.opposition}` : ""}</h2><p>We found an autosaved session from {recoveryCandidate.saved.savedAt ? new Date(recoveryCandidate.saved.savedAt).toLocaleString() : "your previous analysis"}.</p><div className="recovery-summary"><strong>{recoveryCandidate.saved.events?.length || 0}</strong><span>events recovered</span><strong>{recoveryCandidate.saved.rawVideoName ? "Ready" : "Not loaded"}</strong><span>match footage</span></div><div className="modal-actions"><button className="secondary-btn" onClick={discardRecoveredSession}>Discard</button><button className="primary-btn" onClick={restoreRecoveredSession}>Restore Session</button></div></section></div>}
       {showExportCheck && <div className="reliability-modal-backdrop"><section className="reliability-modal"><p className="eyebrow">Export Quality Check</p><h2>{exportWarnings.length} item{exportWarnings.length === 1 ? "" : "s"} to review</h2><p>The report can still be exported, but these checks may affect client-facing accuracy.</p><div className="quality-list">{exportWarnings.map((warning) => <div key={warning}><span>!</span><p>{warning}</p></div>)}</div><div className="modal-actions"><button className="secondary-btn" onClick={() => setShowExportCheck(false)}>Return to Analysis</button><button className="primary-btn" onClick={() => { setShowExportCheck(false); exportPDFReport(true, pendingCoachPackage); }}>Export Anyway</button></div></section></div>}
       {showShortcutGuide && <div className="reliability-modal-backdrop" onMouseDown={() => setShowShortcutGuide(false)}><section className="reliability-modal shortcut-guide" onMouseDown={(event) => event.stopPropagation()}><button className="notice-close" onClick={() => setShowShortcutGuide(false)}>×</button><p className="eyebrow">{analystProfile.name}'s Controls</p><h2>Shortcut Cheat Sheet</h2><p>Press <kbd>?</kbd> anywhere to open or close this guide.</p><div className="shortcut-guide-grid">{[

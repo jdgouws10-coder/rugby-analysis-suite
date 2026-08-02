@@ -1,13 +1,108 @@
-const { app, BrowserWindow, ipcMain, dialog } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, safeStorage } = require("electron");
 const { autoUpdater } = require("electron-updater");
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
 const { pathToFileURL } = require("url");
-const { execFile } = require("child_process");
+const { execFile, spawn } = require("child_process");
+const { randomUUID } = require("crypto");
+const { S3Client, HeadBucketCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
+const { Upload } = require("@aws-sdk/lib-storage");
 const ffmpegPath = require("ffmpeg-static");
 
 let mainWindow = null;
+
+const R2_BUCKET = "rugby-analysis-footage";
+const R2_ACCOUNT_ID = "dc4a87c08ad4697b622775462c45f1eb";
+
+function cloudConfigPath() {
+  return path.join(app.getPath("userData"), "cloud-storage.bin");
+}
+
+function readCloudConfig() {
+  const configPath = cloudConfigPath();
+  if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(configPath)) return null;
+  try {
+    const encrypted = fs.readFileSync(configPath);
+    return JSON.parse(safeStorage.decryptString(encrypted));
+  } catch {
+    return null;
+  }
+}
+
+function writeCloudConfig(config) {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error("Windows secure storage is unavailable.");
+  fs.writeFileSync(cloudConfigPath(), safeStorage.encryptString(JSON.stringify(config)));
+}
+
+function r2Client(config = readCloudConfig()) {
+  if (!config?.accessKeyId || !config?.secretAccessKey) throw new Error("Cloud storage is not connected yet.");
+  return new S3Client({
+    region: "auto",
+    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    forcePathStyle: true,
+    credentials: { accessKeyId: config.accessKeyId, secretAccessKey: config.secretAccessKey },
+  });
+}
+
+ipcMain.handle("cloud-storage-status", async () => {
+  const configured = Boolean(readCloudConfig());
+  return { configured, bucket: R2_BUCKET, retentionDays: 60 };
+});
+
+ipcMain.handle("configure-cloud-storage", async (_event, data) => {
+  const accessKeyId = String(data?.accessKeyId || "").trim();
+  const secretAccessKey = String(data?.secretAccessKey || "").trim();
+  if (!accessKeyId || !secretAccessKey) return { success: false, message: "Both Cloudflare credentials are required." };
+  try {
+    const client = r2Client({ accessKeyId, secretAccessKey });
+    await client.send(new HeadBucketCommand({ Bucket: R2_BUCKET }));
+    writeCloudConfig({ accessKeyId, secretAccessKey });
+    return { success: true, bucket: R2_BUCKET };
+  } catch (error) {
+    return { success: false, message: `Cloudflare connection failed: ${error?.message || error}` };
+  }
+});
+
+ipcMain.handle("upload-video-to-cloud", async (event, data) => {
+  const videoPath = path.resolve(String(data?.videoPath || ""));
+  if (!videoPath || !fs.existsSync(videoPath)) return { success: false, message: "The selected footage could not be found." };
+  const stat = fs.statSync(videoPath);
+  const originalName = path.basename(videoPath);
+  const safeName = originalName.replace(/[^a-zA-Z0-9._-]+/g, "-");
+  const month = new Date().toISOString().slice(0, 7);
+  const key = `raw/${month}/${randomUUID()}-${safeName}`;
+  try {
+    const client = r2Client();
+    const upload = new Upload({
+      client,
+      params: {
+        Bucket: R2_BUCKET,
+        Key: key,
+        Body: fs.createReadStream(videoPath),
+        ContentType: String(data?.contentType || "video/mp4"),
+        Metadata: { originalname: encodeURIComponent(originalName), retention: "60-days" },
+      },
+      queueSize: 3,
+      partSize: 64 * 1024 * 1024,
+      leavePartsOnError: false,
+    });
+    upload.on("httpUploadProgress", (progress) => {
+      const loaded = Number(progress.loaded || 0);
+      event.sender.send("cloud-upload-progress", {
+        loaded,
+        total: stat.size,
+        percent: stat.size ? Math.min(100, Math.round((loaded / stat.size) * 100)) : 0,
+      });
+    });
+    await upload.done();
+    await client.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    event.sender.send("cloud-upload-progress", { loaded: stat.size, total: stat.size, percent: 100, done: true });
+    return { success: true, key, name: originalName, size: stat.size, retentionDays: 60 };
+  } catch (error) {
+    return { success: false, message: `Upload failed: ${error?.message || error}` };
+  }
+});
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -525,6 +620,233 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
       fs.rmSync(tempRoot, { recursive: true, force: true });
     } catch (_) {}
   }
+});
+
+ipcMain.handle("build-training-dataset", async (_event, data) => {
+  const videoPath = path.resolve(String(data?.videoPath || ""));
+  const events = Array.isArray(data?.events) ? data.events.filter((item) => Number.isFinite(Number(item?.seconds)) && item?.event) : [];
+  if (!videoPath || !fs.existsSync(videoPath)) return { success: false, message: "The original match video could not be found." };
+  if (!events.length) return { success: false, message: "The .ras project contains no valid tagged events." };
+
+  const libraryRoot = path.join(app.getPath("userData"), "AI Training Library");
+  const matchLabel = safeFileName(`${data.matchName || "team"}-vs-${data.opposition || "opposition"}`) || "training-match";
+  const datasetFolder = path.join(libraryRoot, `${matchLabel}-${Date.now()}`);
+  const clipsRoot = path.join(datasetFolder, "clips");
+  const manifestPath = path.join(datasetFolder, "manifest.json");
+  fs.mkdirSync(clipsRoot, { recursive: true });
+
+  const manifest = {
+    schemaVersion: 1,
+    status: "extracting",
+    createdAt: new Date().toISOString(),
+    source: {
+      videoPath,
+      videoName: data.videoName || path.basename(videoPath),
+      projectName: data.projectName || "",
+    },
+    match: {
+      team: data.matchName || "",
+      opposition: data.opposition || "",
+      teamColour: data.teamColour || "",
+      firstHalfDirection: data.direction || "unknown",
+      camera: data.camera || "unknown",
+    },
+    clipPolicy: { beforeSeconds: 7, afterSeconds: 4, width: 960, audioIncluded: false },
+    examples: [],
+  };
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+  try {
+    for (let index = 0; index < events.length; index += 1) {
+      const item = events[index];
+      const eventSlug = safeFileName(item.event) || "unclassified";
+      const eventFolder = path.join(clipsRoot, eventSlug);
+      fs.mkdirSync(eventFolder, { recursive: true });
+      const start = Math.max(0, Number(item.seconds) - 7);
+      const duration = Number(item.seconds) < 7 ? Number(item.seconds) + 4 : 11;
+      const clipName = `${String(index + 1).padStart(4, "0")}-${eventSlug}-${Math.round(Number(item.seconds))}s.mp4`;
+      const clipPath = path.join(eventFolder, clipName);
+
+      _event.sender.send("training-progress", {
+        event: item.event,
+        completed: index,
+        total: events.length,
+        percent: (index / events.length) * 100,
+      });
+
+      await runFFmpeg([
+        "-y", "-ss", String(start), "-i", videoPath, "-t", String(Math.max(1, duration)),
+        "-vf", "scale=960:-2", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
+        "-movflags", "+faststart", clipPath,
+      ]);
+
+      manifest.examples.push({
+        id: item.id,
+        category: item.category || "",
+        event: item.event,
+        outcome: item.outcome || "",
+        reason: item.reason || "",
+        zone: item.zone || "",
+        timestamp: Number(item.seconds),
+        originalTime: item.time || "",
+        clipStart: start,
+        clipEnd: start + duration,
+        clipPath: path.relative(datasetFolder, clipPath),
+        reviewStatus: "trusted",
+      });
+      fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    }
+
+    manifest.status = "ready-for-review";
+    manifest.completedAt = new Date().toISOString();
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    _event.sender.send("training-progress", { completed: events.length, total: events.length, percent: 100, done: true });
+    return { success: true, folder: datasetFolder, datasetId: path.basename(datasetFolder), clips: events.length };
+  } catch (error) {
+    manifest.status = "failed";
+    manifest.error = error.message;
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    return { success: false, folder: datasetFolder, message: error.message };
+  }
+});
+
+ipcMain.handle("list-training-datasets", async () => {
+  try {
+    const libraryRoot = path.join(app.getPath("userData"), "AI Training Library");
+    if (!fs.existsSync(libraryRoot)) return { success: true, datasets: [] };
+    const datasets = [];
+    for (const entry of fs.readdirSync(libraryRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const manifestPath = path.join(libraryRoot, entry.name, "manifest.json");
+      if (!fs.existsSync(manifestPath)) continue;
+      try {
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+        let migrated = false;
+        for (const example of manifest.examples || []) {
+          if (example.reviewStatus === "pending" && !example.reviewedAt) {
+            example.reviewStatus = "trusted";
+            migrated = true;
+          }
+        }
+        if (migrated) fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+        datasets.push({
+          id: entry.name,
+          status: manifest.status || "unknown",
+          createdAt: manifest.createdAt || "",
+          team: manifest.match?.team || "",
+          opposition: manifest.match?.opposition || "",
+          videoName: manifest.source?.videoName || "",
+          examples: (manifest.examples || []).map((example) => ({
+            ...example,
+            clipUrl: pathToFileURL(path.join(libraryRoot, entry.name, example.clipPath)).toString(),
+          })),
+        });
+      } catch (_) {}
+    }
+    datasets.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+    return { success: true, datasets };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle("update-training-example", async (_event, data) => {
+  try {
+    const allowedStatuses = new Set(["trusted", "pending", "approved", "rejected", "duplicate", "unclear"]);
+    if (!allowedStatuses.has(data?.reviewStatus)) return { success: false, message: "Invalid review status." };
+    const datasetId = path.basename(String(data?.datasetId || ""));
+    const libraryRoot = path.join(app.getPath("userData"), "AI Training Library");
+    const manifestPath = path.join(libraryRoot, datasetId, "manifest.json");
+    if (!datasetId || !fs.existsSync(manifestPath)) return { success: false, message: "Training dataset not found." };
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    const example = (manifest.examples || []).find((item) => Number(item.id) === Number(data.exampleId));
+    if (!example) return { success: false, message: "Training example not found." };
+    example.reviewStatus = data.reviewStatus;
+    example.reviewedAt = new Date().toISOString();
+    if (typeof data.correctedEvent === "string" && data.correctedEvent.trim()) example.correctedEvent = data.correctedEvent.trim();
+    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+    return { success: true };
+  } catch (error) {
+    return { success: false, message: error.message };
+  }
+});
+
+ipcMain.handle("run-ai-scan", async (_event, data) => {
+  const videoPath = path.resolve(String(data?.videoPath || ""));
+  if (!videoPath || !fs.existsSync(videoPath)) return { success: false, message: "The selected raw match footage could not be found." };
+  const engineRoot = process.env.RAS_AI_ENGINE || path.join("C:\\Users\\jdgou\\OneDrive\\Documents\\Rugby analsysis suite", "ai-engine");
+  const pythonPath = path.join(engineRoot, ".venv", "Scripts", "python.exe");
+  const scriptPath = path.join(engineRoot, "scan_full_match.py");
+  const modelPath = path.join(engineRoot, "models", "full-match-resnet18.pt");
+  if (!fs.existsSync(pythonPath) || !fs.existsSync(scriptPath) || !fs.existsSync(modelPath)) {
+    return { success: false, message: "The experimental AI lineout model is not installed on this computer." };
+  }
+
+  return new Promise((resolve) => {
+    _event.sender.send("ai-scan-progress", { stage: "Preparing match frames", percent: 5 });
+    const child = spawn(pythonPath, [scriptPath, "--video", videoPath, "--model", modelPath, "--ffmpeg", ffmpegPath], { windowsHide: true });
+    let stdoutBuffer = "";
+    let stderr = "";
+    let finalResult = null;
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || "";
+      for (const line of lines) {
+        try {
+          const progress = JSON.parse(line);
+          if (progress.stage === "scanning") {
+            const percent = progress.total ? 15 + (progress.completed / progress.total) * 80 : 15;
+            _event.sender.send("ai-scan-progress", { ...progress, stage: "Classifying rugby events", percent });
+          }
+          if (progress.stage === "complete") finalResult = progress;
+        } catch (_) {}
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => resolve({ success: false, message: error.message }));
+    child.on("close", (code) => {
+      if (code !== 0 || !finalResult) {
+        resolve({ success: false, message: stderr.trim() || `AI scan stopped with code ${code}.` });
+        return;
+      }
+      _event.sender.send("ai-scan-progress", { stage: "Review queue ready", percent: 100 });
+      resolve({ success: true, detections: finalResult.detections || [], framesScanned: finalResult.framesScanned || 0, experimental: true });
+    });
+  });
+});
+
+ipcMain.handle("retrain-ai-model", async (_event) => {
+  const engineRoot = process.env.RAS_AI_ENGINE || path.join("C:\\Users\\jdgou\\OneDrive\\Documents\\Rugby analsysis suite", "ai-engine");
+  const pythonPath = path.join(engineRoot, ".venv", "Scripts", "python.exe");
+  const scriptPath = path.join(engineRoot, "train_full_match.py");
+  const modelPath = path.join(engineRoot, "models", "full-match-resnet18.pt");
+  const libraryRoot = path.join(app.getPath("userData"), "AI Training Library");
+  if (![pythonPath, scriptPath, libraryRoot].every((item) => fs.existsSync(item))) return { success: false, message: "The AI training engine or Training Library is unavailable." };
+  return new Promise((resolve) => {
+    const child = spawn(pythonPath, [scriptPath, "--library", libraryRoot, "--ffmpeg", ffmpegPath, "--output", modelPath, "--epochs", "18"], { windowsHide: true });
+    let buffer = "";
+    let stderr = "";
+    let finalResult = null;
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        try {
+          const progress = JSON.parse(line);
+          if (progress.stage === "training") _event.sender.send("ai-scan-progress", { stage: `Retraining model • epoch ${progress.epoch} of ${progress.epochs}`, percent: (progress.epoch / progress.epochs) * 100 });
+          if (progress.stage === "complete") finalResult = progress;
+        } catch (_) {}
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => resolve({ success: false, message: error.message }));
+    child.on("close", (code) => {
+      if (code !== 0 || !finalResult) return resolve({ success: false, message: stderr.trim() || `AI retraining stopped with code ${code}.` });
+      resolve({ success: true, validationAccuracy: finalResult.validationAccuracy, classes: finalResult.classes?.length || 0, frames: finalResult.frames || 0 });
+    });
+  });
 });
 
 app.whenReady().then(() => {
