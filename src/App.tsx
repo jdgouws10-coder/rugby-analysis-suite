@@ -279,7 +279,7 @@ const clipPaddingPresets: {
   before: number;
   after: number;
 }[] = [
-  { id: "quick", title: "Quick Review", description: "Shortest clips for rapid event review.", before: 6, after: 3 },
+  { id: "quick", title: "Quick Review", description: "Shortest clips for rapid event review.", before: 8, after: 3 },
   { id: "coach", title: "Coach Review", description: "Enough build-up for coaching context.", before: 15, after: 3 },
   { id: "deep", title: "Deep Analysis", description: "Longer build-up and follow-up.", before: 30, after: 10 },
 ];
@@ -2434,7 +2434,7 @@ export default function App() {
           .reverse()
           .map((event) => {
             const storedAttackStart = event.attackStartSeconds;
-            const usesFullAttack = ["Good Attacking Sequences", "Scrum Launch", "Lineout Launch"].includes(type)
+            const usesFullAttack = ["Good Attacking Sequences", "Scrum Launch", "Lineout Launch", "Try Scored"].includes(type)
               && typeof storedAttackStart === "number";
             const rawStart = usesFullAttack
               ? Math.max(0, storedAttackStart - 2)
