@@ -3479,6 +3479,7 @@ body {
 .dataset-example-meta { display: flex; justify-content: space-between; gap: 20px; align-items: start; margin-top: 18px; }
 .dataset-example-meta h2 { margin: 3px 0 4px; }
 .dataset-example-meta p { color: #829087; }
+.dataset-anchor-guidance { margin: 12px 0 0; padding: 11px 13px; border-left: 3px solid #7ed957; border-radius: 0 10px 10px 0; color: #b8c8bf; background: rgba(126,217,87,.07); font-size: 12px; line-height: 1.5; }
 .review-status { padding: 7px 10px; border-radius: 99px; color: #a7b4ad; background: rgba(255,255,255,.06); font-size: 10px; font-weight: 900; text-transform: uppercase; }
 .review-status.approved { color: #bde8a7; background: rgba(126,217,87,.11); }
 .review-status.rejected { color: #ff9c90; background: rgba(255,80,70,.1); }

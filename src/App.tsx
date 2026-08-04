@@ -96,6 +96,7 @@ type PhasePerformance = {
   gainline: GainlineResult;
   ruckSpeed: RuckSpeed;
   zone?: string;
+  seconds?: number;
 };
 
 type Notice = {
@@ -254,7 +255,7 @@ const penaltyConcededReasons = [
 ];
 
 const clipTypeGroups = [
-  { id: "attack", label: "Attack", types: ["Good Attacking Sequences", "Gold Zone Entries", "Scrum Launch", "Lineout Launch", "Transition Attack", "Kick Return Attack", "Maul Launch", "Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"] },
+  { id: "attack", label: "Attack", types: ["Quick Rucks", "Average Rucks", "Slow Rucks", "Good Attacking Sequences", "Gold Zone Entries", "Scrum Launch", "Lineout Launch", "Transition Attack", "Kick Return Attack", "Maul Launch", "Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"] },
   { id: "set-piece", label: "Set Piece", types: ["Lineout Won", "Lineout Lost", "Scrum Won", "Scrum Lost", "Opponent Lineout Stolen", "Opponent Scrum Stolen"] },
   { id: "kicking", label: "Kicking", types: ["Contestable Kick Regained", "Contestable Kick Lost", "Successful Exit", "Failed Exit", "Positive Clearance", "Poor Clearance"] },
   { id: "defence", label: "Defence", types: ["Tackle Made", "Tackle Missed", "Ball Won", "Try Conceded", "Penalty Conceded"] },
@@ -283,6 +284,18 @@ const clipPaddingPresets: {
   { id: "coach", title: "Coach Review", description: "Enough build-up for coaching context.", before: 15, after: 3 },
   { id: "deep", title: "Deep Analysis", description: "Longer build-up and follow-up.", before: 30, after: 10 },
 ];
+
+const RUCK_CLIP_BEFORE_SECONDS = 5;
+const RUCK_CLIP_AFTER_SECONDS = 1;
+const TRY_CONCEDED_CLIP_BEFORE_SECONDS = 15;
+const TRY_CONCEDED_CLIP_AFTER_SECONDS = 3;
+
+function ruckSpeedForClipType(type: string): RuckSpeed | null {
+  if (type === "Quick Rucks") return "Quick";
+  if (type === "Average Rucks") return "Average";
+  if (type === "Slow Rucks") return "Slow";
+  return null;
+}
 
 const attackOutcomeOptions = ["Penalty Won", "Penalty Conceded", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"];
 const defenceEventOptions = ["Tackle Made", "Tackle Missed", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Penalty Won", "Penalty Conceded", "Try Conceded"];
@@ -946,9 +959,9 @@ export default function App() {
         if (shortcut === keybinds.gainlineWon) setPendingGainline("Won");
         if (shortcut === keybinds.gainlineNeutral) setPendingGainline("Neutral");
         if (shortcut === keybinds.gainlineLost) setPendingGainline("Lost");
-        if (shortcut === keybinds.ruckQuick) setPendingRuckSpeed("Quick");
-        if (shortcut === keybinds.ruckAverage) setPendingRuckSpeed("Average");
-        if (shortcut === keybinds.ruckSlow) setPendingRuckSpeed("Slow");
+        if (shortcut === keybinds.ruckQuick) tagRuckSpeed("Quick");
+        if (shortcut === keybinds.ruckAverage) tagRuckSpeed("Average");
+        if (shortcut === keybinds.ruckSlow) tagRuckSpeed("Slow");
         if (shortcut === keybinds.completePhase && attackAction === "phase" && pendingGainline && pendingRuckSpeed) completePhase();
         if (shortcut === keybinds.undoPhase && phaseCount > 0) undoLastPhase();
         if (shortcut === keybinds.finishAttack) setAttackAction("finish");
@@ -1208,13 +1221,18 @@ export default function App() {
     startAttack("Lineout", "Lineout", style);
   }
 
-  function completePhase() {
-    if (!pendingGainline || !pendingRuckSpeed || !phaseZoneConfirmed) return;
-    setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed: pendingRuckSpeed, zone: selectedZone }]);
+  function completePhase(ruckSpeed: RuckSpeed | null = pendingRuckSpeed) {
+    if (!pendingGainline || !ruckSpeed || !phaseZoneConfirmed) return;
+    setPhasePerformance((prev) => [...prev, { gainline: pendingGainline, ruckSpeed, zone: selectedZone, seconds: currentSeconds() }]);
     setPhaseCount((prev) => prev + 1);
     setPendingGainline(null);
     setPendingRuckSpeed(null);
-    setPhaseZoneConfirmed(false);
+    setPhaseZoneConfirmed(true);
+  }
+
+  function tagRuckSpeed(speed: RuckSpeed) {
+    setPendingRuckSpeed(speed);
+    if (pendingGainline && phaseZoneConfirmed) completePhase(speed);
   }
 
   function finishAttack(outcome: string, reason?: string, kickType?: KickType) {
@@ -2428,7 +2446,20 @@ export default function App() {
 
     const clipGroups = selectedClipTypes
       .map((type) => {
-        const rawClips = events
+        const ruckSpeed = ruckSpeedForClipType(type);
+        const rawClips = ruckSpeed
+          ? events.flatMap((event) => (event.phasePerformance || []).flatMap((phase, phaseIndex) => {
+              if (phase.ruckSpeed !== ruckSpeed || typeof phase.seconds !== "number") return [];
+              const rawStart = Math.max(0, phase.seconds - RUCK_CLIP_BEFORE_SECONDS);
+              return [{
+                id: event.id + phaseIndex,
+                label: `${ruckSpeed} Ruck • ${phase.zone || event.zone} • Phase ${phaseIndex + 1}`,
+                originalTime: formatTime(phase.seconds),
+                rawStart,
+                rawEnd: Math.max(rawStart + 1, phase.seconds + RUCK_CLIP_AFTER_SECONDS),
+              }];
+            }))
+          : events
           .filter((event) => matchesClipType(event, type))
           .slice()
           .reverse()
@@ -2438,8 +2469,8 @@ export default function App() {
               && typeof storedAttackStart === "number";
             const rawStart = usesFullAttack
               ? Math.max(0, storedAttackStart - 2)
-              : Math.max(0, event.seconds - selectedClipPadding.before);
-            const rawEnd = Math.max(rawStart + 1, event.seconds + selectedClipPadding.after);
+              : Math.max(0, event.seconds - (type === "Try Conceded" ? TRY_CONCEDED_CLIP_BEFORE_SECONDS : selectedClipPadding.before));
+            const rawEnd = Math.max(rawStart + 1, event.seconds + (type === "Try Conceded" ? TRY_CONCEDED_CLIP_AFTER_SECONDS : selectedClipPadding.after));
             return { id: event.id, label: clipLabel(event), originalTime: event.time, rawStart, rawEnd };
           })
           .sort((a, b) => a.rawStart - b.rawStart);
@@ -2943,12 +2974,13 @@ export default function App() {
               </div>
               <p className="phase-label">Ruck Speed</p>
               <div className="phase-choice-grid ruck-choices">
-                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => { const action: KeybindAction = speed === "Quick" ? "ruckQuick" : speed === "Average" ? "ruckAverage" : "ruckSlow"; return <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => setPendingRuckSpeed(speed)}>{speed}<kbd>{keybinds[action]}</kbd></button>; })}
+                {(["Quick", "Average", "Slow"] as RuckSpeed[]).map((speed) => { const action: KeybindAction = speed === "Quick" ? "ruckQuick" : speed === "Average" ? "ruckAverage" : "ruckSlow"; return <button key={speed} className={`${speed.toLowerCase()} ${pendingRuckSpeed === speed ? "selected" : ""}`} onClick={() => tagRuckSpeed(speed)}>{speed}<kbd>{keybinds[action]}</kbd></button>; })}
               </div>
               <div className="phase-action-row">
                 <button className="secondary-btn" disabled={!phaseCount} onClick={undoLastPhase}>Undo Last Phase <kbd>{keybinds.undoPhase}</kbd></button>
-                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed || !phaseZoneConfirmed} onClick={completePhase}>{phaseZoneConfirmed ? "Complete Phase" : "Confirm Zone First"} <kbd>{keybinds.completePhase}</kbd></button>
+                <button className="complete-phase-btn" disabled={!pendingGainline || !pendingRuckSpeed || !phaseZoneConfirmed} onClick={() => completePhase()}>{phaseZoneConfirmed ? "Mark Ball Played" : "Confirm Zone First"} <kbd>{keybinds.completePhase}</kbd></button>
               </div>
+              <p className="phase-label">Fast workflow: confirm the zone and gainline first, then press Quick, Average or Slow as the ball is played. That speed button records the phase immediately; Enter remains available as a fallback.</p>
             </div>}
 
             {attackAction === "finish" && <div className="logging-step-card">
@@ -3262,13 +3294,15 @@ export default function App() {
               <div className="padding-presets">
                 {clipPaddingPresets.map((preset) => <button key={preset.id} type="button" onClick={() => { setClipPaddingPresetId(preset.id); setGeneratedClips([]); }} className={clipPaddingPresetId === preset.id ? "active" : ""}><strong>{preset.title}</strong><span>{preset.before}s before / {preset.after}s after</span><small>{preset.description}</small></button>)}
               </div>
+              <p className="muted">Ruck clips start 5s before the ball is played and finish 1s after it.</p>
+              <p className="muted">Try Conceded clips use 15s before and 3s after to show the defensive cause and finish.</p>
             </div>
             <button className="primary-btn full" onClick={generateClipList}>Build Compilation Preview</button>
           </div>
 
           <div className="panel preview-card">
             <div className="section-head"><div><p className="eyebrow">Compilation Preview</p><h2>Compilation Summary</h2></div><button className="secondary-btn small" onClick={() => setGeneratedClips([])}>Clear Preview</button></div>
-            <div className="summary-strip"><span>{generatedClips.length} groups</span><span>{totalPreviewClips} clips</span><span>{formatTime(totalPreviewDuration)} total footage</span><span>{selectedClipPadding.before}s / {selectedClipPadding.after}s padding</span></div>
+            <div className="summary-strip"><span>{generatedClips.length} groups</span><span>{totalPreviewClips} clips</span><span>{formatTime(totalPreviewDuration)} total footage</span><span>Rucks: 5s before / 1s after</span></div>
             {generatedClips.length === 0 ? <div className="empty-state">Analyse a match or import TXT, then build a compilation preview.</div> : (
               <div className="preview-list">
                 {generatedClips.map((group) => <div className="clip-group" key={group.type}><div className="group-head"><div><h4>{titleCase(group.type)}</h4><p>{group.clips.length} clips • {formatTime(totalGroupDuration(group))}</p></div></div>{group.clips.map((clip, index) => <div className="clip-row" key={`${group.type}-${clip.id}-${index}`}><div><strong>Clip {index + 1}</strong><p>{clip.label}</p><small>Event: {clip.originalTime}</small></div><h4>{formatTime(clip.rawStart)} → {formatTime(clip.rawEnd)}</h4></div>)}</div>)}

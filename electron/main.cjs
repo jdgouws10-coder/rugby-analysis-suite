@@ -636,7 +636,7 @@ ipcMain.handle("build-training-dataset", async (_event, data) => {
   fs.mkdirSync(clipsRoot, { recursive: true });
 
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     status: "extracting",
     createdAt: new Date().toISOString(),
     source: {
@@ -651,7 +651,13 @@ ipcMain.handle("build-training-dataset", async (_event, data) => {
       firstHalfDirection: data.direction || "unknown",
       camera: data.camera || "unknown",
     },
-    clipPolicy: { beforeSeconds: 7, afterSeconds: 4, width: 960, audioIncluded: false },
+    clipPolicy: {
+      beforeSeconds: 8,
+      afterSeconds: 3,
+      width: 960,
+      audioIncluded: false,
+      anchorPolicy: "The logged keypress is the primary event. Surrounding actions provide context only.",
+    },
     examples: [],
   };
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
@@ -662,8 +668,10 @@ ipcMain.handle("build-training-dataset", async (_event, data) => {
       const eventSlug = safeFileName(item.event) || "unclassified";
       const eventFolder = path.join(clipsRoot, eventSlug);
       fs.mkdirSync(eventFolder, { recursive: true });
-      const start = Math.max(0, Number(item.seconds) - 7);
-      const duration = Number(item.seconds) < 7 ? Number(item.seconds) + 4 : 11;
+      const eventTimestamp = Number(item.seconds);
+      const start = Math.max(0, eventTimestamp - 8);
+      const duration = eventTimestamp < 8 ? eventTimestamp + 3 : 11;
+      const anchorSeconds = eventTimestamp - start;
       const clipName = `${String(index + 1).padStart(4, "0")}-${eventSlug}-${Math.round(Number(item.seconds))}s.mp4`;
       const clipPath = path.join(eventFolder, clipName);
 
@@ -687,10 +695,20 @@ ipcMain.handle("build-training-dataset", async (_event, data) => {
         outcome: item.outcome || "",
         reason: item.reason || "",
         zone: item.zone || "",
-        timestamp: Number(item.seconds),
+        timestamp: eventTimestamp,
         originalTime: item.time || "",
         clipStart: start,
         clipEnd: start + duration,
+        anchorSeconds,
+        primaryEvent: {
+          label: item.event,
+          category: item.category || "",
+          outcome: item.outcome || "",
+          reason: item.reason || "",
+          zone: item.zone || "",
+          source: "manual-keypress",
+        },
+        analysisInstruction: `Focus on ${item.event} at ${anchorSeconds.toFixed(2)} seconds into this clip. Treat earlier and later actions as context, not competing labels.`,
         clipPath: path.relative(datasetFolder, clipPath),
         reviewStatus: "trusted",
       });
