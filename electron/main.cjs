@@ -358,21 +358,28 @@ function safeFileName(value) {
 
 function escapeDrawText(value) {
   return String(value || "COMPILATION")
-    .toUpperCase()
     .replace(/\\/g, "\\\\")
     .replace(/:/g, "\\:")
-    .replace(/'/g, "\\'");
+    .replace(/'/g, "\\'")
+    .replace(/,/g, "\\,")
+    .replace(/%/g, "\\%")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
 }
 
 function quoteConcatPath(filePath) {
   return `file '${String(filePath).replace(/'/g, "'\\''")}'`;
 }
 
-function buildTitleFilter(groupType) {
-  const title = escapeDrawText(groupType);
+function buildTitleFilter(groupType, subtitle) {
+  const note = String(subtitle || "").trim().slice(0, 120);
+  const headingText = `${groupType}${note ? `: ${note}` : ""}`;
+  const heading = /[.!?]$/.test(headingText) ? headingText : `${headingText}.`;
+  const title = escapeDrawText(heading);
+  const fontSize = heading.length > 85 ? 27 : heading.length > 60 ? 32 : heading.length > 40 ? 38 : 46;
   return [
     "pad=iw:ih+88:0:88:black",
-    `drawtext=fontfile='C\\:/Windows/Fonts/arialbd.ttf':text='${title}':fontcolor=white:fontsize=46:x=(w-text_w)/2:y=19`,
+    `drawtext=fontfile='C\\:/Windows/Fonts/arialbd.ttf':text='${title}':fontcolor=white:fontsize=${fontSize}:x=(w-text_w)/2:y=(88-text_h)/2`,
   ].join(",");
 }
 
@@ -580,7 +587,7 @@ ipcMain.handle("generate-compilations", async (_event, data) => {
           "-t",
           String(duration),
           "-vf",
-          buildTitleFilter(group.type),
+          buildTitleFilter(group.type, clip.subtitle),
           "-c:v",
           "libx264",
           "-preset",

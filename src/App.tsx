@@ -27,7 +27,7 @@ declare global {
       }>;
       generateCompilations: (data: {
         videoPath: string;
-        groups: { type: string; clips: { rawStart: number; rawEnd: number }[] }[];
+        groups: { type: string; clips: { rawStart: number; rawEnd: number; subtitle?: string }[] }[];
         variant: string;
       }) => Promise<{ success: boolean; outputs?: string[]; message?: string }>;
       buildTrainingDataset: (data: {
@@ -126,6 +126,7 @@ type EventLog = {
   goldZoneOutcome?: string;
   attackStartSeconds?: number;
   positiveSequence?: boolean;
+  coachingMoment?: boolean;
 };
 
 type ClipGroup = {
@@ -136,6 +137,7 @@ type ClipGroup = {
     originalTime: string;
     rawStart: number;
     rawEnd: number;
+    subtitle?: string;
   }[];
 };
 
@@ -150,6 +152,7 @@ type EditableEvent = {
   reason: string;
   zone: string;
   note: string;
+  coachingMoment?: boolean;
 };
 
 type AIReviewEvent = EventLog & {
@@ -255,14 +258,18 @@ const penaltyConcededReasons = [
 ];
 
 const clipTypeGroups = [
-  { id: "attack", label: "Attack", types: ["Quick Rucks", "Average Rucks", "Slow Rucks", "Good Attacking Sequences", "Gold Zone Entries", "Scrum Launch", "Lineout Launch", "Transition Attack", "Kick Return Attack", "Maul Launch", "Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"] },
+  { id: "attack", label: "Attack", types: ["Good Attacking Moment", "Bad Attacking Moment", "Quick Rucks", "Average Rucks", "Slow Rucks", "Good Attacking Sequences", "Gold Zone Entries", "Scrum Launch", "Lineout Launch", "Transition Attack", "Kick Return Attack", "Maul Launch", "Penalty Won", "Try Scored", "3 Points Taken", "Ball Lost", "Held Up – Retain Ball"] },
   { id: "set-piece", label: "Set Piece", types: ["Lineout Won", "Lineout Lost", "Scrum Won", "Scrum Lost", "Opponent Lineout Stolen", "Opponent Scrum Stolen"] },
   { id: "kicking", label: "Kicking", types: ["Contestable Kick Regained", "Contestable Kick Lost", "Successful Exit", "Failed Exit", "Positive Clearance", "Poor Clearance"] },
-  { id: "defence", label: "Defence", types: ["Tackle Made", "Tackle Missed", "Ball Won", "Try Conceded", "Penalty Conceded"] },
+  { id: "defence", label: "Defence", types: ["Good Defensive Moment", "Bad Defensive Moment", "Tackle Made", "Tackle Missed", "Ball Won", "Try Conceded", "Penalty Conceded"] },
   { id: "maul", label: "Maul", types: ["Maul Retained", "Maul Penalty Won", "Maul Try", "Maul Sacked", "Maul Lost"] },
 ] as const;
 
 const defaultReviewClipTypes = [
+  "Good Attacking Moment",
+  "Bad Attacking Moment",
+  "Good Defensive Moment",
+  "Bad Defensive Moment",
   "Good Attacking Sequences",
   "Ball Lost",
   "Try Conceded",
@@ -289,6 +296,8 @@ const RUCK_CLIP_BEFORE_SECONDS = 5;
 const RUCK_CLIP_AFTER_SECONDS = 1;
 const TRY_CONCEDED_CLIP_BEFORE_SECONDS = 15;
 const TRY_CONCEDED_CLIP_AFTER_SECONDS = 3;
+const COACHING_MOMENT_CLIP_BEFORE_SECONDS = 10;
+const COACHING_MOMENT_CLIP_AFTER_SECONDS = 5;
 
 function ruckSpeedForClipType(type: string): RuckSpeed | null {
   if (type === "Quick Rucks") return "Quick";
@@ -382,6 +391,7 @@ function toFileUrl(filePath: string) {
 
 function clipLabel(event: EventLog) {
   const reason = event.reason ? ` • ${event.reason}` : "";
+  if (event.coachingMoment) return `${event.event} • ${event.zone}`;
   if (event.kickType) return `${event.kickType} Kick • ${event.zone}${event.endZone ? ` to ${event.endZone}` : ""} • ${event.outcome}${reason}`;
   if (event.category === "attack") return `${event.positiveSequence ? "Good Attacking Sequence • " : ""}${event.attackType} Attack${event.lineoutLaunch ? ` • ${event.lineoutLaunch} lineout` : ""} • ${event.zone} • ${event.outcome}${reason}`;
   if (event.category === "kick") return `Kick Event • ${event.zone} • ${event.outcome}${reason}`;
@@ -418,6 +428,8 @@ function totalGroupDuration(group: { clips: { rawStart: number; rawEnd: number }
 
 function eventTone(event: EventLog) {
   const outcome = event.outcome || event.event;
+  if (["Good Attacking Moment", "Good Defensive Moment"].includes(outcome)) return "positive";
+  if (["Bad Attacking Moment", "Bad Defensive Moment"].includes(outcome)) return "negative";
   if (["Penalty Won", "Try Scored", "3 Points Taken", "Contestable Kick Regained", "Successful Exit", "Positive Clearance", "Lineout Won", "Scrum Won", "Ball Won", "Opponent Lineout Stolen", "Opponent Scrum Stolen", "Opposition Held Up", "Tackle Made", "Maul Try", "Maul Penalty Won", "Maul Retained", "Held Up – Retain Ball", "Possession Gained"].includes(outcome)) return "positive";
   if (["Ball Lost", "Contestable Kick Lost", "Failed Exit", "Charged Down", "Poor Clearance", "Direct Into Touch", "Lineout Lost", "Scrum Lost", "Penalty Conceded", "Tackle Missed", "Try Conceded", "Maul Lost", "Maul Sacked", "Possession Lost"].includes(outcome)) return "negative";
   return "neutral";
@@ -664,6 +676,7 @@ export default function App() {
   const [ballWonReason, setBallWonReason] = useState("Jackal");
   const [penaltyWonReason, setPenaltyWonReason] = useState("Holding On");
   const [penaltyConcededReason, setPenaltyConcededReason] = useState("Offside");
+  const [coachingMomentNote, setCoachingMomentNote] = useState("");
 
   const [rawVideoName, setRawVideoName] = useState("");
   const [rawVideoPath, setRawVideoPath] = useState("");
@@ -725,8 +738,8 @@ export default function App() {
   const [isLoadingTrainingDatasets, setIsLoadingTrainingDatasets] = useState(false);
   const trainingProjectInputRef = useRef<HTMLInputElement | null>(null);
 
-  const attacks = events.filter((event) => event.category === "attack");
-  const defenceEvents = events.filter((event) => event.category === "defence");
+  const attacks = events.filter((event) => event.category === "attack" && !event.coachingMoment);
+  const defenceEvents = events.filter((event) => event.category === "defence" && !event.coachingMoment);
   const totalAttacks = attacks.length;
   const successfulAttacks = attacks.filter((event) => successfulAttackOutcomes.includes(event.outcome || "")).length;
   const ballLosses = attacks.filter((event) => event.outcome === "Ball Lost").length;
@@ -1293,6 +1306,13 @@ export default function App() {
     }
   }
 
+  function addCoachingMoment(eventName: string, category: "attack" | "defence") {
+    const note = coachingMomentNote.trim();
+    addEvent({ category, event: eventName, outcome: eventName, coachingMoment: true, note: note || undefined });
+    setCoachingMomentNote("");
+    notify("Moment Tagged", `${eventName}: 10 seconds before and 5 seconds after will be included in its clip.`, "success");
+  }
+
   function startMaul(fromLineout = false) {
     if (!requireVideo()) return;
     setMaulFromLineout(fromLineout);
@@ -1523,7 +1543,8 @@ export default function App() {
         setPlaybackVideoUrl(data.playbackVideoUrl || data.rawVideoUrl || "");
         setPanelSwitching(data.panelSwitching || "automatic");
         setClipPaddingPresetId(data.clipPaddingPresetId || "coach");
-        setSelectedClipTypes(Array.isArray(data.selectedClipTypes) ? data.selectedClipTypes : defaultReviewClipTypes);
+        const savedClipTypes = Array.isArray(data.selectedClipTypes) ? data.selectedClipTypes : defaultReviewClipTypes;
+        setSelectedClipTypes([...new Set([...savedClipTypes, "Good Attacking Moment", "Bad Attacking Moment", "Good Defensive Moment", "Bad Defensive Moment"])]);
         setGeneratedClips([]);
         setCompilationOutputs([]);
         notify("Project Opened", `${file.name} loaded successfully.`, "success");
@@ -1831,7 +1852,7 @@ export default function App() {
       doc.text(String(index), margin + 8, y + 6.1, { align: "center" });
       doc.setTextColor(15, 23, 42);
       doc.setFontSize(9.5);
-      doc.text(`TAKEAWAY ${index} - ${label.toUpperCase()}`, margin + 16, y + 2);
+      doc.text(`FACTOR ${index} - ${label.toUpperCase()}`, margin + 16, y + 2);
       doc.setTextColor(71, 85, 105);
       doc.setFont("helvetica", "normal");
       doc.setFontSize(8.3);
@@ -2189,9 +2210,7 @@ export default function App() {
       takeawayItems.forEach(({ metric, tone }, index) => addInsightCard(
         index + 1,
         `${tone === "positive" ? "POSITIVE" : "COST"}  •  ${metric.label}`,
-        tone === "positive"
-          ? `${metric.display} against a ${metric.target} reference. A key positive performance indicator.`
-          : `${metric.display} against a ${metric.target} reference. A key development indicator to review.`,
+        `${metric.display}.`,
         tone,
       ));
     } else {
@@ -2199,10 +2218,9 @@ export default function App() {
     }
     addSection("ADDITIONAL CONTRIBUTING FACTORS");
     if (matchWorkOns.length) {
-      matchWorkOns.forEach((metric) => {
-        const takeawayNumber = takeawayItems.findIndex((item) => item.metric.label === metric.label) + 1;
+      matchWorkOns.forEach((metric, index) => {
         addContributingFactor(
-          takeawayNumber,
+          index + 1,
           metric.label,
           contributingFactorExplanation(metric.label),
         );
@@ -2467,11 +2485,12 @@ export default function App() {
             const storedAttackStart = event.attackStartSeconds;
             const usesFullAttack = ["Good Attacking Sequences", "Scrum Launch", "Lineout Launch", "Try Scored"].includes(type)
               && typeof storedAttackStart === "number";
+            const isCoachingMoment = event.coachingMoment === true;
             const rawStart = usesFullAttack
               ? Math.max(0, storedAttackStart - 2)
-              : Math.max(0, event.seconds - (type === "Try Conceded" ? TRY_CONCEDED_CLIP_BEFORE_SECONDS : selectedClipPadding.before));
-            const rawEnd = Math.max(rawStart + 1, event.seconds + (type === "Try Conceded" ? TRY_CONCEDED_CLIP_AFTER_SECONDS : selectedClipPadding.after));
-            return { id: event.id, label: clipLabel(event), originalTime: event.time, rawStart, rawEnd };
+              : Math.max(0, event.seconds - (isCoachingMoment ? COACHING_MOMENT_CLIP_BEFORE_SECONDS : type === "Try Conceded" ? TRY_CONCEDED_CLIP_BEFORE_SECONDS : selectedClipPadding.before));
+            const rawEnd = Math.max(rawStart + 1, event.seconds + (isCoachingMoment ? COACHING_MOMENT_CLIP_AFTER_SECONDS : type === "Try Conceded" ? TRY_CONCEDED_CLIP_AFTER_SECONDS : selectedClipPadding.after));
+            return { id: event.id, label: clipLabel(event), originalTime: event.time, rawStart, rawEnd, subtitle: event.coachingMoment ? event.note : undefined };
           })
           .sort((a, b) => a.rawStart - b.rawStart);
         const clips = type === "Tackle Missed"
@@ -2534,7 +2553,7 @@ export default function App() {
       return;
     }
 
-    const orderedGroups = generatedClips.map((group) => ({ type: group.type, clips: group.clips.map((clip) => ({ rawStart: clip.rawStart, rawEnd: clip.rawEnd })) }));
+    const orderedGroups = generatedClips.map((group) => ({ type: group.type, clips: group.clips.map((clip) => ({ rawStart: clip.rawStart, rawEnd: clip.rawEnd, subtitle: clip.subtitle })) }));
     setIsGeneratingCompilation(true);
     setStatusMessage("Generating compilation videos...");
 
@@ -2945,6 +2964,15 @@ export default function App() {
           {attackActive && <span className="status available">{phaseCount} phases</span>}
         </div>
 
+        <div className="coaching-moment-box">
+          <p className="eyebrow">Quick Moment Tags • 10s Before / 5s After</p>
+          <label className="coaching-moment-note">Coach subtitle (optional)<input maxLength={120} value={coachingMomentNote} onChange={(event) => setCoachingMomentNote(event.target.value)} placeholder="e.g. No counter-ruck or double action" /></label>
+          <div className="button-grid two">
+            <button onClick={() => addCoachingMoment("Good Attacking Moment", "attack")}>Good Attacking Moment</button>
+            <button className="negative" onClick={() => addCoachingMoment("Bad Attacking Moment", "attack")}>Bad Attacking Moment</button>
+          </div>
+        </div>
+
         {attackActive ? (
           <>
             <div className="active-strip">
@@ -3088,6 +3116,14 @@ export default function App() {
         <div className="panel-head compact">
           <div><p className="eyebrow">Defence Panel</p><h2>Defensive Actions</h2></div>
         </div>
+        <div className="coaching-moment-box">
+          <p className="eyebrow">Quick Moment Tags • 10s Before / 5s After</p>
+          <label className="coaching-moment-note">Coach subtitle (optional)<input maxLength={120} value={coachingMomentNote} onChange={(event) => setCoachingMomentNote(event.target.value)} placeholder="e.g. No counter-ruck or double action" /></label>
+          <div className="button-grid two">
+            <button onClick={() => addCoachingMoment("Good Defensive Moment", "defence")}>Good Defensive Moment</button>
+            <button className="negative" onClick={() => addCoachingMoment("Bad Defensive Moment", "defence")}>Bad Defensive Moment</button>
+          </div>
+        </div>
         <InlineZoneSelector label="Action Zone" />
         <div className="button-grid two">
           <button onClick={() => addDefenceEvent("Tackle Made")}>Tackle Made <kbd>{keybinds.tackleMade}</kbd></button>
@@ -3115,12 +3151,12 @@ export default function App() {
         {events.map((event) => (
           <div className={`event-row ${eventTone(event)}`} key={event.id}>
             <button onClick={() => jumpTo(event.seconds)}>{event.time}</button>
-            <strong>{event.category === "attack" ? `${event.attackType} Attack` : event.event}</strong>
+            <strong>{event.coachingMoment ? event.event : event.category === "attack" ? `${event.attackType} Attack` : event.event}</strong>
             <span title={event.category === "attack" ? zoneProgression(event) : event.zone}>{event.category === "attack" ? zoneProgression(event) : event.zone}</span>
-            <span>{event.category === "attack" ? `${event.lineoutLaunch ? `${event.lineoutLaunch} lineout • ` : ""}${event.phases || 0} phases • ${event.outcome || "No outcome"}${event.kickType ? ` • ${event.kickType} kick to ${event.endZone || event.zone}` : ""}` : event.outcome || event.category}</span>
+            <span>{event.coachingMoment ? "Coaching clip • 10s before / 5s after" : event.category === "attack" ? `${event.lineoutLaunch ? `${event.lineoutLaunch} lineout • ` : ""}${event.phases || 0} phases • ${event.outcome || "No outcome"}${event.kickType ? ` • ${event.kickType} kick to ${event.endZone || event.zone}` : ""}` : event.outcome || event.category}</span>
             <span>{event.reason || "—"}</span>
             <div className="event-actions">
-              <button onClick={() => openEditEvent(event)}>Edit</button>
+              {!event.coachingMoment && <button onClick={() => openEditEvent(event)}>Edit</button>}
               <button onClick={() => deleteEvent(event.id)}>Delete</button>
             </div>
             {event.note && <p className="event-note">Note: {event.note}</p>}
@@ -3305,7 +3341,7 @@ export default function App() {
             <div className="summary-strip"><span>{generatedClips.length} groups</span><span>{totalPreviewClips} clips</span><span>{formatTime(totalPreviewDuration)} total footage</span><span>Rucks: 5s before / 1s after</span></div>
             {generatedClips.length === 0 ? <div className="empty-state">Analyse a match or import TXT, then build a compilation preview.</div> : (
               <div className="preview-list">
-                {generatedClips.map((group) => <div className="clip-group" key={group.type}><div className="group-head"><div><h4>{titleCase(group.type)}</h4><p>{group.clips.length} clips • {formatTime(totalGroupDuration(group))}</p></div></div>{group.clips.map((clip, index) => <div className="clip-row" key={`${group.type}-${clip.id}-${index}`}><div><strong>Clip {index + 1}</strong><p>{clip.label}</p><small>Event: {clip.originalTime}</small></div><h4>{formatTime(clip.rawStart)} → {formatTime(clip.rawEnd)}</h4></div>)}</div>)}
+                {generatedClips.map((group) => <div className="clip-group" key={group.type}><div className="group-head"><div><h4>{titleCase(group.type)}</h4><p>{group.clips.length} clips • {formatTime(totalGroupDuration(group))}</p></div></div>{group.clips.map((clip, index) => { const heading = `${group.type}${clip.subtitle ? `: ${clip.subtitle}` : ""}`; return <div className="clip-row" key={`${group.type}-${clip.id}-${index}`}><div><strong>Clip {index + 1}</strong><p>{/[.!?]$/.test(heading) ? heading : `${heading}.`}</p><small>Event: {clip.originalTime}</small></div><h4>{formatTime(clip.rawStart)} → {formatTime(clip.rawEnd)}</h4></div>; })}</div>)}
               </div>
             )}
             <div className="action-stack"><button className="secondary-btn" onClick={generateTestClip} disabled={isGenerating || isGeneratingCompilation}>{isGenerating ? "Generating Test..." : "Generate Test Clip"}</button><button className="primary-btn" onClick={generateFullCompilation} disabled={isGenerating || isGeneratingCompilation}>{isGeneratingCompilation ? "Generating Videos..." : "Generate Compilation Videos"}</button></div>
