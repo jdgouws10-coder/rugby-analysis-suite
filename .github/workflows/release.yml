@@ -30,7 +30,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "Organises Auto Clip Creator outputs into collapsible Attack, Set Piece, Kicking, Defence and Maul groups. Updates now apply silently after restarting Rugby Analysis Suite, without displaying the Windows installer wizard."
+            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "Adds good and bad attacking and defensive coaching-moment clips with fixed review timing and optional notes in the video title. Corrects PDF contributing-factor numbering and removes repetitive takeaway wording."
           }
           gh release upload $tag `
             "release/Rugby-Analysis-Suite-Setup.exe" `
