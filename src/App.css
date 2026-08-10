@@ -3599,3 +3599,8 @@ body {
   text-transform: none;
   letter-spacing: normal;
 }
+.analysis-shell .video-frame .match-video {
+  height: auto !important;
+  min-height: 0;
+  aspect-ratio: auto;
+}
