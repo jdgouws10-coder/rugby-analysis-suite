@@ -146,6 +146,7 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.5.0": ["New Video Walkthrough with drawing tools and optional voice recording.", "Export walkthroughs as MP4 videos.", "Organise clips in saved playlist folders.", "Present full-screen with a floating drawing toolbar.", "Refreshed home screen; Opposition Analysis remains Beta."],
     "1.4.1": [
       "Organised compilation types into collapsible Attack, Set Piece, Kicking, Defence and Maul groups.",
       "Simplified the Auto Clip Creator selector while preserving the existing clip-generation workflow.",
@@ -404,6 +405,29 @@ ipcMain.handle("select-video", async () => {
     name: path.basename(filePath),
     url: pathToFileURL(filePath).toString(),
   };
+});
+
+ipcMain.handle("save-walkthrough", async (_event, data) => {
+  let temporary;
+  try {
+    const bytes = data?.bytes;
+    if (!(bytes instanceof ArrayBuffer) || bytes.byteLength === 0) return { success: false, message: "No recording data was received." };
+    const result = await dialog.showSaveDialog({title: "Export MP4 Walkthrough", defaultPath: `Video-Walkthrough-${Date.now()}.mp4`, filters: [{name: "MP4 Video", extensions: ["mp4"]}]});
+    if (result.canceled || !result.filePath) return {success: false, message: "Save cancelled. Your recording is still ready to save."};
+    temporary = await fs.promises.mkdtemp(path.join(app.getPath('temp'), 'ras-walkthrough-'));
+    const source = path.join(temporary, 'recording.webm');
+    const encoded = path.join(temporary, 'walkthrough.mp4');
+    await fs.promises.writeFile(source, Buffer.from(bytes));
+    await runFFmpeg(['-y','-i',source,'-map','0:v:0','-map','0:a?','-vf','pad=ceil(iw/2)*2:ceil(ih/2)*2','-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k','-movflags','+faststart',encoded]);
+    await fs.promises.copyFile(encoded, result.filePath);
+    return {success: true};
+  } catch(error) {return {success: false, message: error.message};}
+  finally {if(temporary) {for(const name of ['recording.webm','walkthrough.mp4']) await fs.promises.unlink(path.join(temporary,name)).catch(()=>{}); await fs.promises.rmdir(temporary).catch(()=>{});}}
+});
+
+ipcMain.handle('select-walkthrough-videos', async () => {
+  const result = await dialog.showOpenDialog({title:'Add videos to playlist',properties:['openFile','multiSelections'],filters:[{name:'Video',extensions:['mp4','mov','m4v','webm','mkv','avi']}]});
+  return result.canceled ? [] : result.filePaths.map(file=>({path:file,name:path.basename(file),url:pathToFileURL(file).toString()}));
 });
 
 
@@ -838,6 +862,79 @@ ipcMain.handle("run-ai-scan", async (_event, data) => {
       _event.sender.send("ai-scan-progress", { stage: "Review queue ready", percent: 100 });
       resolve({ success: true, detections: finalResult.detections || [], framesScanned: finalResult.framesScanned || 0, experimental: true });
     });
+  });
+});
+
+ipcMain.handle("track-tactical-clip", async (_event, data) => {
+  const videoPath = path.resolve(String(data?.videoPath || ""));
+  const attackColour = String(data?.attackColour || "");
+  const defenceColour = String(data?.defenceColour || "");
+  if (!videoPath || !fs.existsSync(videoPath)) return { success: false, message: "The selected clip could not be found." };
+  if (!/^#[0-9a-f]{6}$/i.test(attackColour) || !/^#[0-9a-f]{6}$/i.test(defenceColour)) {
+    return { success: false, message: "Confirm the attacking and defending jersey colours before tracking." };
+  }
+  const engineRoot = process.env.RAS_AI_ENGINE || path.join("C:\\Users\\jdgou\\OneDrive\\Documents\\Rugby analsysis suite", "ai-engine");
+  const pythonPath = path.join(engineRoot, ".venv", "Scripts", "python.exe");
+  const scriptPath = path.join(engineRoot, "track_seeded_clip.py");
+  const modelPath = path.join(engineRoot, "models", "yolo11n.pt");
+  if (![pythonPath, scriptPath, modelPath].every((item) => fs.existsSync(item))) {
+    return { success: false, message: "The local player-tracking engine is not installed." };
+  }
+  return new Promise((resolve) => {
+    const child = spawn(pythonPath, [scriptPath, "--mode", "track", "--video", videoPath, "--attack", attackColour, "--defence", defenceColour, "--model", modelPath, "--anchor", String(Number(data?.anchorTime || 0)), "--seeds", JSON.stringify(data?.seeds || [])], { windowsHide: true });
+    let buffer = "";
+    let stderr = "";
+    let finalResult = null;
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        try {
+          const progress = JSON.parse(line);
+          if (progress.stage === "tracking") _event.sender.send("tactical-tracking-progress", progress);
+          if (progress.stage === "complete") finalResult = progress;
+          if (progress.stage === "error") stderr = progress.message || stderr;
+        } catch (_) {}
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => resolve({ success: false, message: error.message }));
+    child.on("close", (code) => {
+      if (code !== 0 || !finalResult) return resolve({ success: false, message: stderr.trim() || `Tracking stopped with code ${code}.` });
+      _event.sender.send("tactical-tracking-progress", { stage: "complete", percent: 100 });
+      resolve({ success: true, ...finalResult });
+    });
+  });
+});
+
+ipcMain.handle("inspect-tactical-frame", async (_event, data) => {
+  const videoPath = path.resolve(String(data?.videoPath || ""));
+  const attackColour = String(data?.attackColour || "");
+  const defenceColour = String(data?.defenceColour || "");
+  if (!videoPath || !fs.existsSync(videoPath)) return { success: false, message: "The selected clip could not be found." };
+  if (!/^#[0-9a-f]{6}$/i.test(attackColour) || !/^#[0-9a-f]{6}$/i.test(defenceColour)) return { success: false, message: "Confirm both team colours first." };
+  const engineRoot = process.env.RAS_AI_ENGINE || path.join("C:\\Users\\jdgou\\OneDrive\\Documents\\Rugby analsysis suite", "ai-engine");
+  const pythonPath = path.join(engineRoot, ".venv", "Scripts", "python.exe");
+  const scriptPath = path.join(engineRoot, "track_seeded_clip.py");
+  const modelPath = path.join(engineRoot, "models", "yolo11n.pt");
+  if (![pythonPath, scriptPath, modelPath].every((item) => fs.existsSync(item))) return { success: false, message: "The local player-tracking engine is not installed." };
+  return new Promise((resolve) => {
+    const child = spawn(pythonPath, [scriptPath, "--mode", "inspect", "--video", videoPath, "--attack", attackColour, "--defence", defenceColour, "--model", modelPath, "--anchor", String(Number(data?.anchorTime || 0)), "--region", data?.region ? JSON.stringify(data.region) : ""], { windowsHide: true });
+    let buffer = "";
+    let stderr = "";
+    let finalResult = null;
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        try { const parsed = JSON.parse(line); if (parsed.stage === "complete") finalResult = parsed; if (parsed.stage === "error") stderr = parsed.message || stderr; } catch (_) {}
+      }
+    });
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("error", (error) => resolve({ success: false, message: error.message }));
+    child.on("close", (code) => code === 0 && finalResult ? resolve({ success: true, ...finalResult }) : resolve({ success: false, message: stderr.trim() || `Frame analysis stopped with code ${code}.` }));
   });
 });
 

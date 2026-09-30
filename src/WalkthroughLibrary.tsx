@@ -1,0 +1,17 @@
+import {useState} from 'react';
+export type LibraryVideo = {id:string; name:string; url:string; path:string};
+type Folder = {id:string; name:string; videos:LibraryVideo[]};
+export default function WalkthroughLibrary({disabled,onChoose,currentUrl}:{disabled:boolean;onChoose:(video:LibraryVideo)=>void;currentUrl?:string}) {
+  const [folders,setFolders]=useState<Folder[]>(()=>{try{return JSON.parse(localStorage.getItem('ras-walkthrough-library')||'[]');}catch{return [];}});
+  const [selected,setSelected]=useState('');
+  const [name,setName]=useState('');
+  const [error,setError]=useState('');
+  const folder=folders.find(f=>f.id===selected)||folders[0];
+  function update(next:Folder[]){try{localStorage.setItem('ras-walkthrough-library',JSON.stringify(next));setFolders(next);setError('');}catch{setError('Could not save the library. Storage may be full.');}}
+  async function add(){if(!folder)return;try{const videos=await window.electronAPI.selectWalkthroughVideos(); update(folders.map(f=>f.id===folder.id?{...f,videos:[...f.videos,...videos.filter(v=>!f.videos.some(old=>old.path===v.path)).map(v=>({...v,id:crypto.randomUUID()}))]}:f));}catch(e){setError(String(e));}}
+  const index=folder?.videos.findIndex(v=>v.url===currentUrl)??-1;
+  return <section className="panel walkthrough-library"><p className="eyebrow">YOUR PLAYLISTS</p><h2>Review library</h2><div className="library-create"><input aria-label="Folder name" placeholder="New folder / playlist" value={name} maxLength={80} onChange={e=>setName(e.target.value)}/><button disabled={disabled||!name.trim()} onClick={()=>{const id=crypto.randomUUID();update([...folders,{id,name:name.trim(),videos:[]}]);setSelected(id);setName('');}}>Create</button></div>
+    {folder && <><select aria-label="Playlist folder" disabled={disabled} value={folder.id} onChange={e=>setSelected(e.target.value)}>{folders.map(f=><option key={f.id} value={f.id}>{f.name} ({f.videos.length})</option>)}</select><div className="walkthrough-tools"><button disabled={disabled} onClick={add}>Add videos</button><button disabled={disabled||!name.trim()} onClick={()=>{update(folders.map(f=>f.id===folder.id?{...f,name:name.trim()}:f));setName('');}}>Rename folder</button></div><div className="playlist-items">{folder.videos.map((v,i)=><div key={v.id} className={v.url===currentUrl?'current':''}><button disabled={disabled} onClick={()=>onChoose(v)} title={v.name}>{i+1}. {v.name}</button><button aria-label={`Move ${v.name} up`} disabled={disabled||i===0} onClick={()=>{const videos=[...folder.videos];[videos[i-1],videos[i]]=[videos[i],videos[i-1]];update(folders.map(f=>f.id===folder.id?{...f,videos}:f));}}>↑</button><button aria-label={`Remove ${v.name} from playlist`} disabled={disabled} onClick={()=>update(folders.map(f=>f.id===folder.id?{...f,videos:f.videos.filter(a=>a.id!==v.id)}:f))}>×</button></div>)}</div><div className="walkthrough-tools"><button disabled={disabled||index<=0} onClick={()=>onChoose(folder.videos[index-1])}>Previous clip</button><button disabled={disabled||!folder.videos.length||index>=folder.videos.length-1} onClick={()=>onChoose(folder.videos[index+1])}>Next clip</button></div>{!folder.videos.length && <button disabled={disabled} onClick={()=>{update(folders.filter(f=>f.id!==folder.id));setSelected('');}}>Remove empty folder</button>}</>}
+    <small>Folders save your playlist order. Original video files stay where they are. Enter a name above to create or rename a folder.</small>{error&&<p role="alert">{error}</p>}
+  </section>;
+}

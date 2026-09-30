@@ -1,6 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("electronAPI", {
+  saveWalkthrough: (data) => ipcRenderer.invoke("save-walkthrough", data),
+  selectWalkthroughVideos: () => ipcRenderer.invoke("select-walkthrough-videos"),
   selectVideo: () => ipcRenderer.invoke("select-video"),
   cloudStorageStatus: () => ipcRenderer.invoke("cloud-storage-status"),
   configureCloudStorage: (data) => ipcRenderer.invoke("configure-cloud-storage", data),
@@ -17,6 +19,13 @@ contextBridge.exposeInMainWorld("electronAPI", {
   listTrainingDatasets: () => ipcRenderer.invoke("list-training-datasets"),
   updateTrainingExample: (data) => ipcRenderer.invoke("update-training-example", data),
   runAIScan: (data) => ipcRenderer.invoke("run-ai-scan", data),
+  trackTacticalClip: (data) => ipcRenderer.invoke("track-tactical-clip", data),
+  inspectTacticalFrame: (data) => ipcRenderer.invoke("inspect-tactical-frame", data),
+  onTacticalTrackingProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on("tactical-tracking-progress", listener);
+    return () => ipcRenderer.removeListener("tactical-tracking-progress", listener);
+  },
   retrainAIModel: () => ipcRenderer.invoke("retrain-ai-model"),
   exportCoachPackage: (data) => ipcRenderer.invoke("export-coach-package", data),
   onUpdateProgress: (callback) => {

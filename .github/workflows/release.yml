@@ -30,7 +30,7 @@ jobs:
           $tag = "${{ github.ref_name }}"
           gh release view $tag *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "Adds a new Opposition Analysis workspace for capturing video-linked attacking or defensive moments, recording coach observations and desired responses, and presenting each moment as an animated overhead tactical board."
+            gh release create $tag --title "Rugby Analysis Suite $tag" --notes "New Video Walkthrough workspace with optional voice recording, drawing tools, one-click MP4 export, saved playlist folders and full-screen presentation mode. Refreshed home screen keeps Match Analysis and Auto Clip Creator separate and labels Opposition Analysis as Beta."
           }
           gh release upload $tag `
             "release/Rugby-Analysis-Suite-Setup.exe" `
