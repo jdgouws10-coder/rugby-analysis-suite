@@ -146,6 +146,7 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.5.1": ["Video Walkthrough: optional voice recording, drawing and MP4 export at 30 fps.", "Saved playlist folders and full-screen presentation mode.", "Refreshed home screen; Opposition Analysis remains Beta."],
     "1.5.0": ["New Video Walkthrough with drawing tools and optional voice recording.", "Export walkthroughs as MP4 videos.", "Organise clips in saved playlist folders.", "Present full-screen with a floating drawing toolbar.", "Refreshed home screen; Opposition Analysis remains Beta."],
     "1.4.1": [
       "Organised compilation types into collapsible Attack, Set Piece, Kicking, Defence and Maul groups.",
@@ -418,7 +419,7 @@ ipcMain.handle("save-walkthrough", async (_event, data) => {
     const source = path.join(temporary, 'recording.webm');
     const encoded = path.join(temporary, 'walkthrough.mp4');
     await fs.promises.writeFile(source, Buffer.from(bytes));
-    await runFFmpeg(['-y','-i',source,'-map','0:v:0','-map','0:a?','-vf','pad=ceil(iw/2)*2:ceil(ih/2)*2','-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k','-movflags','+faststart',encoded]);
+    await runFFmpeg(['-y','-i',source,'-map','0:v:0','-map','0:a?','-vf','fps=30,pad=ceil(iw/2)*2:ceil(ih/2)*2','-c:v','libx264','-preset','veryfast','-crf','20','-pix_fmt','yuv420p','-c:a','aac','-b:a','160k','-movflags','+faststart',encoded]);
     await fs.promises.copyFile(encoded, result.filePath);
     return {success: true};
   } catch(error) {return {success: false, message: error.message};}
