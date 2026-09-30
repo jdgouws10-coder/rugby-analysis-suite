@@ -3604,3 +3604,60 @@ body {
   min-height: 0;
   aspect-ratio: auto;
 }
+.opposition-shell { min-height: 100vh; padding-bottom: 48px; }
+.opposition-toolbar { width: min(1480px, calc(100vw - 72px)); margin: 14px auto; display: flex; gap: 10px; align-items: center; }
+.opposition-toolbar .status { margin-left: auto; }
+.opposition-intro { position: relative; z-index: 2; width: min(1480px, calc(100vw - 72px)); margin: 24px auto; padding: 28px 32px; display: grid; grid-template-columns: 1.2fr 1fr; gap: 40px; align-items: end; border: 1px solid rgba(126,217,87,.18); border-radius: 28px; background: radial-gradient(circle at 15% 20%,rgba(126,217,87,.14),transparent 38%),rgba(4,15,17,.82); }
+.opposition-intro h1 { margin: 6px 0 0; font-size: clamp(36px,4vw,62px); line-height: .96; letter-spacing: -.05em; }
+.opposition-intro h1 em { color: var(--green); font-style: normal; }
+.opposition-intro > p { color: var(--muted); line-height: 1.7; margin: 0; }
+.opposition-workspace { position: relative; z-index: 2; width: min(1480px, calc(100vw - 72px)); margin: 0 auto; display: grid; grid-template-columns: minmax(560px,1fr) minmax(520px,.9fr); gap: 20px; align-items: start; }
+.opposition-video-column,.opposition-board-column { display: grid; gap: 18px; min-width: 0; }
+.opposition-shell .sticky-panel { position: relative; top: auto; }
+.opposition-capture-card,.tactical-board-card,.opposition-library-card { padding: 20px; }
+.opposition-form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+.opposition-form-grid label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; font-weight: 900; letter-spacing: .08em; text-transform: uppercase; }
+.opposition-form-grid label.wide { grid-column: 1 / -1; }
+.opposition-form-grid input,.opposition-form-grid select,.opposition-form-grid textarea { width: 100%; border: 1px solid rgba(255,255,255,.12); border-radius: 12px; background: rgba(0,0,0,.36); color: #fff; padding: 11px 12px; outline: none; text-transform: none; letter-spacing: normal; }
+.opposition-form-grid textarea { min-height: 76px; resize: vertical; }
+.opposition-board { overflow: hidden; border: 1px solid rgba(255,255,255,.12); border-radius: 18px; background: #132e20; }
+.opposition-board svg { width: 100%; display: block; }
+.board-grass { fill: #173d27; stroke: rgba(255,255,255,.18); stroke-width: .4; }
+.field-line,.halfway { stroke: rgba(255,255,255,.23); stroke-width: .45; stroke-dasharray: 1.4 1.4; }
+.halfway { stroke-width: .8; stroke-dasharray: none; }
+.board-label { fill: rgba(255,255,255,.7); font-size: 2.6px; font-weight: 800; letter-spacing: .35px; }
+.attack-player circle { fill: #f97316; stroke: #fff; stroke-width: .6; }
+.defence-player circle { fill: #38bdf8; stroke: #fff; stroke-width: .6; }
+.attack-player text,.defence-player text { fill: #061014; text-anchor: middle; font-size: 2.6px; font-weight: 900; }
+.attack-route { fill: none; stroke: #fed7aa; stroke-width: 1.2; stroke-dasharray: 3 2; marker-end: none; }
+.defence-route { fill: none; stroke: #bae6fd; stroke-width: .8; stroke-dasharray: 2 1.5; }
+.attack-shape,.defence-shape { transform-box: fill-box; transform-origin: center; }
+.opposition-board.playing .attack-shape { animation: oppositionAttack 2.8s ease-in-out infinite alternate; }
+.opposition-board.playing .defence-shape.response-press { animation: defencePress 2.8s ease-in-out infinite alternate; }
+.opposition-board.playing .defence-shape.response-drift { animation: defenceDrift 2.8s ease-in-out infinite alternate; }
+.opposition-board.playing .defence-shape.response-fold { animation: defenceFold 2.8s ease-in-out infinite alternate; }
+.opposition-board.playing .defence-shape.response-hold { animation: defenceHold 2.8s ease-in-out infinite alternate; }
+.opposition-board.playing .primary-route,.opposition-board.playing .defence-route { animation: routeFlow 1s linear infinite; }
+@keyframes oppositionAttack { to { transform: translateX(14px); } }
+@keyframes defencePress { to { transform: translateX(9px); } }
+@keyframes defenceDrift { to { transform: translate(7px,8px); } }
+@keyframes defenceFold { to { transform: translate(5px,-7px); } }
+@keyframes defenceHold { to { transform: translateX(2px); } }
+@keyframes routeFlow { to { stroke-dashoffset: -8; } }
+.board-legend { display: flex; gap: 18px; padding: 10px 14px; background: rgba(0,0,0,.28); color: var(--muted); font-size: 11px; }
+.board-legend span { display: flex; align-items: center; gap: 7px; }
+.board-legend i { width: 10px; height: 10px; border-radius: 50%; }
+.opposition-dot { background: #f97316; }.defence-dot { background: #38bdf8; }
+.tactical-actions { display: flex; gap: 10px; margin-top: 14px; }
+.tactical-notes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; }
+.tactical-notes article { padding: 14px; border-radius: 14px; background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.08); }
+.tactical-notes span { color: var(--green); font-size: 10px; font-weight: 900; letter-spacing: .09em; text-transform: uppercase; }
+.tactical-notes p { margin: 7px 0 0; color: #e6edf3; line-height: 1.45; }
+.opposition-moment-list { display: grid; gap: 8px; max-height: 330px; overflow: auto; }
+.opposition-moment-list > button { width: 100%; display: grid; grid-template-columns: auto 1fr auto; gap: 12px; align-items: center; padding: 12px; text-align: left; border: 1px solid rgba(255,255,255,.08); border-radius: 13px; background: rgba(255,255,255,.035); color: #fff; }
+.opposition-moment-list > button.active { border-color: rgba(126,217,87,.55); background: rgba(126,217,87,.1); }
+.opposition-moment-list > button > span { color: var(--green); font-weight: 900; }
+.opposition-moment-list div { display: grid; gap: 3px; }.opposition-moment-list small { color: var(--muted); text-transform: capitalize; }
+.opposition-moment-list i { font-style: normal; color: #fca5a5; font-size: 18px; padding: 5px; }
+@media (max-width: 1120px) { .opposition-workspace,.opposition-intro { grid-template-columns: 1fr; }.opposition-workspace,.opposition-intro,.opposition-toolbar { width: min(100% - 30px, 900px); } }
+@media (max-width: 680px) { .opposition-form-grid,.tactical-notes { grid-template-columns: 1fr; }.opposition-form-grid label.wide { grid-column: auto; }.opposition-intro { padding: 22px; } }

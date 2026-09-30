@@ -57,7 +57,7 @@ declare global {
   }
 }
 
-type View = "home" | "analysis" | "compilations" | "plays" | "support" | "settings";
+type View = "home" | "analysis" | "compilations" | "opposition" | "plays" | "support" | "settings";
 type NoticeType = "success" | "warning" | "error" | "info";
 type Panel = "attack" | "defence";
 type PanelSwitching = "automatic" | "manual";
@@ -71,6 +71,20 @@ type Keybinds = Record<KeybindAction, string>;
 type SettingsTab = "keybinds" | "appearance" | "profile" | "updates";
 type AppearanceSettings = { accent: string; accent2: string; motion: "off" | "subtle" | "full"; density: "compact" | "comfortable"; backdrop: number; glass: number };
 type AnalystProfile = { name: string; role: string; email: string; phone: string };
+type OppositionMode = "attack" | "defence";
+type OppositionPattern = "Front Nine" | "Out the Back" | "Edge Shape" | "Kick Threat" | "Custom";
+type DefenceResponse = "Press" | "Drift" | "Hold" | "Fold";
+type OppositionMoment = {
+  id: number;
+  title: string;
+  seconds: number;
+  time: string;
+  mode: OppositionMode;
+  pattern: OppositionPattern;
+  response: DefenceResponse;
+  observation: string;
+  coachingPlan: string;
+};
 
 const defaultAppearance: AppearanceSettings = { accent: "#7ed957", accent2: "#5cb338", motion: "full", density: "comfortable", backdrop: 72, glass: 82 };
 const defaultProfile: AnalystProfile = { name: "", role: "Performance Analyst", email: "", phone: "" };
@@ -677,6 +691,15 @@ export default function App() {
   const [penaltyWonReason, setPenaltyWonReason] = useState("Holding On");
   const [penaltyConcededReason, setPenaltyConcededReason] = useState("Offside");
   const [coachingMomentNote, setCoachingMomentNote] = useState("");
+  const [oppositionMoments, setOppositionMoments] = useState<OppositionMoment[]>(() => { try { return JSON.parse(localStorage.getItem("ras-opposition-moments") || "[]"); } catch (_) { return []; } });
+  const [oppositionMode, setOppositionMode] = useState<OppositionMode>("attack");
+  const [oppositionPattern, setOppositionPattern] = useState<OppositionPattern>("Front Nine");
+  const [oppositionResponse, setOppositionResponse] = useState<DefenceResponse>("Press");
+  const [oppositionTitle, setOppositionTitle] = useState("");
+  const [oppositionObservation, setOppositionObservation] = useState("");
+  const [oppositionCoachingPlan, setOppositionCoachingPlan] = useState("");
+  const [selectedOppositionMomentId, setSelectedOppositionMomentId] = useState<number | null>(null);
+  const [tacticalBoardPlaying, setTacticalBoardPlaying] = useState(false);
 
   const [rawVideoName, setRawVideoName] = useState("");
   const [rawVideoPath, setRawVideoPath] = useState("");
@@ -850,6 +873,7 @@ export default function App() {
   }, [appearance, activeAnalystId]);
 
   useEffect(() => { localStorage.setItem(`ras-analyst-profile-${activeAnalystId}`, JSON.stringify(analystProfile)); }, [analystProfile, activeAnalystId]);
+  useEffect(() => { localStorage.setItem("ras-opposition-moments", JSON.stringify(oppositionMoments)); }, [oppositionMoments]);
 
   useEffect(() => {
     try {
@@ -2760,6 +2784,7 @@ export default function App() {
             <ModuleCard number="01" title="Match Analysis" status="Available" description="Tag attack, defence, kicking, set piece and maul events. Export professional coach reports." action="Open Module →" onClick={() => setView("analysis")} />
             <ModuleCard number="02" title="Auto Clip Creator" status="Available" description="Turn tagged moments into organised MP4 coaching compilations from the raw match footage." action="Launch Module →" onClick={() => setView("compilations")} highlight />
             <ModuleCard number="03" title="AI Match Analysis" status="Beta" description="Scan match footage, review AI-detected rugby events and send approved moments into the full analysis workflow." action="Open Beta →" onClick={() => setView("plays")} />
+            <ModuleCard number="04" title="Opposition Analysis" status="Available" description="Link opposition clips to animated overhead tactical boards and your coaching response." action="Build Tactical Review →" onClick={() => setView("opposition")} />
           </div>
         </section>
         <NoticeToast />
@@ -3353,6 +3378,92 @@ export default function App() {
     );
   }
 
+  function saveOppositionMoment() {
+    if (!requireVideo()) return;
+    const seconds = currentSeconds();
+    const moment: OppositionMoment = {
+      id: Date.now(),
+      title: oppositionTitle.trim() || `${oppositionPattern} ${oppositionMode === "attack" ? "Attack" : "Defence"}`,
+      seconds,
+      time: formatTime(seconds),
+      mode: oppositionMode,
+      pattern: oppositionPattern,
+      response: oppositionResponse,
+      observation: oppositionObservation.trim(),
+      coachingPlan: oppositionCoachingPlan.trim(),
+    };
+    setOppositionMoments((items) => [moment, ...items]);
+    setSelectedOppositionMomentId(moment.id);
+    setTacticalBoardPlaying(false);
+    setOppositionTitle("");
+    setOppositionObservation("");
+    setOppositionCoachingPlan("");
+    notify("Tactical Moment Saved", `${moment.title} was linked to ${moment.time}.`, "success");
+  }
+
+  function OppositionTacticalBoard({ moment }: { moment: OppositionMoment }) {
+    const patternClass = moment.pattern.toLowerCase().replace(/\s+/g, "-");
+    const attack = [[18,50],[29,35],[29,65],[40,50],[51,29],[51,50],[51,71],[65,40],[65,60]];
+    const defence = [[29,20],[38,30],[42,42],[44,54],[42,66],[38,78],[29,88]];
+    return <div className={`opposition-board ${tacticalBoardPlaying ? "playing" : ""} pattern-${patternClass}`}>
+      <svg viewBox="0 0 100 100" role="img" aria-label={`${moment.pattern} overhead tactical board`}>
+        <rect x="1" y="1" width="98" height="98" rx="3" className="board-grass" />
+        {[20,40,50,60,80].map((x) => <line key={x} x1={x} y1="2" x2={x} y2="98" className={x === 50 ? "halfway" : "field-line"} />)}
+        <text x="7" y="9" className="board-label">OPPOSITION ATTACK →</text>
+        <g className="attack-shape">{attack.map(([x,y], index) => <g key={index} className={`attack-player p${index + 1}`}><circle cx={x} cy={y} r="3.2" /><text x={x} y={y + 1.2}>{index === 0 ? "9" : index + 1}</text></g>)}</g>
+        <g className={`defence-shape response-${moment.response.toLowerCase()}`}>{defence.map(([x,y], index) => <g key={index} className={`defence-player p${index + 1}`}><circle cx={x} cy={y} r="3.2" /><text x={x} y={y + 1.2}>{index + 1}</text></g>)}</g>
+        <path className="attack-route primary-route" d={moment.pattern === "Out the Back" ? "M20 50 C36 50 43 70 67 60" : moment.pattern === "Front Nine" ? "M18 50 C29 50 36 37 51 29" : moment.pattern === "Edge Shape" ? "M18 50 C42 48 56 40 76 25" : moment.pattern === "Kick Threat" ? "M18 50 C42 50 62 34 86 15" : "M18 50 C38 50 55 50 76 50"} />
+        <path className="defence-route" d={moment.response === "Press" ? "M43 18 L51 18 M47 30 L55 30 M49 42 L57 42 M50 54 L58 54 M49 66 L57 66 M47 78 L55 78" : moment.response === "Drift" ? "M43 22 C51 30 55 42 61 58 M47 36 C55 43 59 54 65 69" : moment.response === "Fold" ? "M42 78 C50 69 53 57 57 45 M38 87 C49 75 54 63 61 52" : "M44 20 L44 86"} />
+      </svg>
+      <div className="board-legend"><span><i className="opposition-dot" /> Opposition</span><span><i className="defence-dot" /> Your defensive response</span></div>
+    </div>;
+  }
+
+  function OppositionAnalysisPage() {
+    const selected = oppositionMoments.find((moment) => moment.id === selectedOppositionMomentId) || oppositionMoments[0] || null;
+    return <main className="ras-shell opposition-shell">
+      <div className="grid-bg" />
+      <Topbar moduleTitle="Opposition Analysis • Tactical Board" />
+      <section className="analysis-toolbar opposition-toolbar">
+        <button className="home-btn" onClick={() => setView("home")}>← Home</button>
+        <button className="secondary-btn" onClick={() => setView("analysis")}>Open Match Analysis</button>
+        <span className="status available">{oppositionMoments.length} tactical moment{oppositionMoments.length === 1 ? "" : "s"}</span>
+      </section>
+      <section className="opposition-intro">
+        <div><p className="eyebrow">Video to tactical review</p><h1>See the pattern.<br /><em>Coach the answer.</em></h1></div>
+        <p>Pause on an opposition moment, describe what happened, choose the closest shape and save it. The linked clip and animated overhead board stay together for your team review.</p>
+      </section>
+      <section className="opposition-workspace">
+        <div className="opposition-video-column">
+          <VideoPlayer videoRef={videoRef} rawVideoPath={rawVideoPath} playbackVideoUrl={playbackVideoUrl} rawVideoUrl={rawVideoUrl} rawVideoName={rawVideoName} isOptimisingVideo={isOptimisingVideo} playbackRate={playbackRate} onLoadVideo={chooseMatchFootage} onError={handleVideoPlaybackError} onSeek={seekVideo} onSpeedChange={changePlaybackRate} />
+          <section className="panel opposition-capture-card">
+            <div className="section-head"><div><p className="eyebrow">Capture Tactical Moment</p><h2>Link the current video position</h2></div><span>{formatTime(currentSeconds())}</span></div>
+            <div className="opposition-form-grid">
+              <label>Moment title<input value={oppositionTitle} onChange={(event) => setOppositionTitle(event.target.value)} placeholder="e.g. Front-nine strike from midfield" /></label>
+              <label>Moment type<select value={oppositionMode} onChange={(event) => setOppositionMode(event.target.value as OppositionMode)}><option value="attack">Opposition attack</option><option value="defence">Opposition defence</option></select></label>
+              <label>Observed pattern<select value={oppositionPattern} onChange={(event) => setOppositionPattern(event.target.value as OppositionPattern)}>{(["Front Nine","Out the Back","Edge Shape","Kick Threat","Custom"] as OppositionPattern[]).map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label>Your response<select value={oppositionResponse} onChange={(event) => setOppositionResponse(event.target.value as DefenceResponse)}>{(["Press","Drift","Hold","Fold"] as DefenceResponse[]).map((item) => <option key={item}>{item}</option>)}</select></label>
+              <label className="wide">What happened?<textarea value={oppositionObservation} onChange={(event) => setOppositionObservation(event.target.value)} placeholder="They play front nine, with the second receiver out the back of the pod." /></label>
+              <label className="wide">What do you want from the team?<textarea value={oppositionCoachingPlan} onChange={(event) => setOppositionCoachingPlan(event.target.value)} placeholder="Nine presses the first receiver, edge stays connected and the backfield holds for the kick." /></label>
+            </div>
+            <button className="primary-btn full" onClick={saveOppositionMoment}>Capture Moment & Build Board</button>
+          </section>
+        </div>
+        <div className="opposition-board-column">
+          <section className="panel tactical-board-card">
+            <div className="section-head"><div><p className="eyebrow">Animated Tactical Board</p><h2>{selected?.title || "Select or capture a moment"}</h2></div>{selected && <span>{selected.time}</span>}</div>
+            {selected ? <><OppositionTacticalBoard moment={selected} /><div className="tactical-actions"><button className="primary-btn" onClick={() => setTacticalBoardPlaying((playing) => !playing)}>{tacticalBoardPlaying ? "Reset Animation" : "Play Movement"}</button><button className="secondary-btn" onClick={() => jumpTo(selected.seconds)}>Show Original Clip</button></div><div className="tactical-notes"><article><span>What we saw</span><p>{selected.observation || "No observation added."}</p></article><article><span>Our response • {selected.response}</span><p>{selected.coachingPlan || "No coaching response added."}</p></article></div></> : <div className="ai-empty-review"><strong>No tactical moments yet</strong><p>Load footage, pause at the action and capture your first opposition pattern.</p></div>}
+          </section>
+          <section className="panel opposition-library-card">
+            <div className="section-head"><div><p className="eyebrow">Review Library</p><h2>Saved Opposition Moments</h2></div></div>
+            <div className="opposition-moment-list">{oppositionMoments.map((moment) => <button key={moment.id} className={selected?.id === moment.id ? "active" : ""} onClick={() => { setSelectedOppositionMomentId(moment.id); setTacticalBoardPlaying(false); }}><span>{moment.time}</span><div><strong>{moment.title}</strong><small>{moment.mode} • {moment.pattern} • {moment.response}</small></div><i onClick={(event) => { event.stopPropagation(); setOppositionMoments((items) => items.filter((item) => item.id !== moment.id)); }}>×</i></button>)}</div>
+          </section>
+        </div>
+      </section>
+      <NoticeToast />
+    </main>;
+  }
+
   function SettingsPage() {
     const groups: { title: string; description: string; items: { action: KeybindAction; label: string }[] }[] = [
       { title: "Video Playback", description: "Controls available whenever match footage is loaded.", items: [
@@ -3928,6 +4039,7 @@ export default function App() {
 
   const page = view === "analysis" ? AnalysisPage()
     : view === "compilations" ? CompilationVideosPage()
+      : view === "opposition" ? OppositionAnalysisPage()
       : view === "settings" ? SettingsPage()
         : view === "support" ? SupportPage()
           : view === "plays" ? PlaysPage()
