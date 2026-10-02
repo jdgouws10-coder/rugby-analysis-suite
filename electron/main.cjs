@@ -146,6 +146,7 @@ function createWindow() {
 async function showPatchNotesOnFirstLaunch() {
   const currentVersion = app.getVersion();
   const notesByVersion = {
+    "1.5.2": ["Player spotlight: click to centre a 3-second spotlight on a player.", "Larger presentation video with compact controls and less wasted space.", "Review Library now has its own view for folders and videos.", "More responsive video import with single-click file selection.", "Clearer download progress. Updates install when you close the app without reopening it."],
     "1.5.1": ["Video Walkthrough: optional voice recording, drawing and MP4 export at 30 fps.", "Saved playlist folders and full-screen presentation mode.", "Refreshed home screen; Opposition Analysis remains Beta."],
     "1.5.0": ["New Video Walkthrough with drawing tools and optional voice recording.", "Export walkthroughs as MP4 videos.", "Organise clips in saved playlist folders.", "Present full-screen with a floating drawing toolbar.", "Refreshed home screen; Opposition Analysis remains Beta."],
     "1.4.1": [
@@ -276,13 +277,14 @@ function setupAutoUpdater() {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoRunAppAfterInstall = false;
   const sendUpdateStatus = (state, message, version) => mainWindow?.webContents.send("update-status", { state, message, version });
 
   autoUpdater.on("download-progress", (progress) => {
     sendUpdateStatus("downloading", `Downloading update… ${Math.round(progress.percent)}%`);
     if (!mainWindow) return;
     mainWindow.setProgressBar(Math.max(0, Math.min(1, progress.percent / 100)));
-    mainWindow.webContents.send("update-progress", { percent: progress.percent, transferred: progress.transferred, total: progress.total });
+    mainWindow.webContents.send("update-progress", { percent: progress.percent, transferred: progress.transferred, total: progress.total, bytesPerSecond: progress.bytesPerSecond });
   });
 
   autoUpdater.on("update-available", async (info) => {
@@ -297,27 +299,20 @@ function setupAutoUpdater() {
       cancelId: 1,
     });
 
-    if (result.response === 0) autoUpdater.downloadUpdate();
+    if (result.response === 0) {
+      sendUpdateStatus("downloading", "Starting update download…", info.version);
+      mainWindow?.webContents.send("update-progress", { percent: 0 });
+      autoUpdater.downloadUpdate().catch(error => sendUpdateStatus("error", error.message || "Download failed. Please try again."));
+    }
   });
   autoUpdater.on("update-not-available", (info) => sendUpdateStatus("up-to-date", `You are running the latest version (${info.version}).`, info.version));
 
   autoUpdater.on("update-downloaded", async () => {
-    sendUpdateStatus("ready", "Update downloaded and ready to install.");
+    sendUpdateStatus("ready", "Update ready. It will install when you close the app. No automatic restart.");
     if (mainWindow) {
       mainWindow.setProgressBar(-1);
       mainWindow.webContents.send("update-progress", { percent: 100 });
     }
-    const result = await dialog.showMessageBox(mainWindow, {
-      type: "info",
-      title: "Update Ready",
-      message: "The update has been downloaded.",
-      detail: "Restart Rugby Analysis Suite now to apply it? The update will install silently.",
-      buttons: ["Restart Now", "Later"],
-      defaultId: 0,
-      cancelId: 1,
-    });
-
-    if (result.response === 0) autoUpdater.quitAndInstall(true, true);
   });
 
   autoUpdater.on("error", (error) => {
@@ -427,8 +422,14 @@ ipcMain.handle("save-walkthrough", async (_event, data) => {
 });
 
 ipcMain.handle('select-walkthrough-videos', async () => {
-  const result = await dialog.showOpenDialog({title:'Add videos to playlist',properties:['openFile','multiSelections'],filters:[{name:'Video',extensions:['mp4','mov','m4v','webm','mkv','avi']}]});
+  const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow() || mainWindow, {title:'Add videos to playlist',properties:['openFile','multiSelections'],filters:[{name:'Video',extensions:['mp4','mov','m4v','webm','mkv','avi']}]});
   return result.canceled ? [] : result.filePaths.map(file=>({path:file,name:path.basename(file),url:pathToFileURL(file).toString()}));
+});
+
+ipcMain.handle('select-walkthrough-video', async () => {
+  const result = await dialog.showOpenDialog(BrowserWindow.getFocusedWindow() || mainWindow, {title:'Import walkthrough video',properties:['openFile'],filters:[{name:'Videos',extensions:['mp4','mov','m4v','webm','mkv','avi']},{name:'All files',extensions:['*']}]});
+  const file=result.filePaths[0];
+  return result.canceled || !file ? null : {path:file,name:path.basename(file),url:pathToFileURL(file).toString()};
 });
 
 

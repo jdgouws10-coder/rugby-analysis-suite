@@ -11,6 +11,7 @@ declare global {
     electronAPI: {
       saveWalkthrough: (data: {bytes: ArrayBuffer}) => Promise<{success: boolean; message?: string}>;
       selectWalkthroughVideos: () => Promise<{name:string;path:string;url:string}[]>;
+      selectWalkthroughVideo: () => Promise<{name:string;path:string;url:string} | null>;
       selectVideo: () => Promise<{
         path: string;
         name: string;
@@ -146,6 +147,7 @@ declare global {
           percent: number;
           transferred?: number;
           total?: number;
+          bytesPerSecond?: number;
         }) => void,
       ) => () => void;
       onCompilationProgress?: (
@@ -1288,6 +1290,8 @@ export default function App() {
   });
   const [lastSessionSaved, setLastSessionSaved] = useState("");
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
+  const [updateTransfer, setUpdateTransfer] = useState({ transferred: 0, total: 0, bytesPerSecond: 0 });
+  const [dismissedUpdateState, setDismissedUpdateState] = useState('');
   const [clipStage, setClipStage] = useState(0);
   const [compilationProgress, setCompilationProgress] = useState<{
     group?: string;
@@ -1854,9 +1858,10 @@ export default function App() {
 
   useEffect(() => {
     if (!window.electronAPI?.onUpdateProgress) return;
-    return window.electronAPI.onUpdateProgress((progress) =>
-      setUpdateProgress(Math.round(progress.percent || 0)),
-    );
+    return window.electronAPI.onUpdateProgress((progress) => {
+      setUpdateProgress(Math.max(0, Math.min(100, progress.percent || 0)));
+      setUpdateTransfer({ transferred: progress.transferred || 0, total: progress.total || 0, bytesPerSecond: progress.bytesPerSecond || 0 });
+    });
   }, []);
 
   useEffect(() => {
@@ -1904,7 +1909,10 @@ export default function App() {
       .then(setAppVersion)
       .catch(() => {});
     if (!window.electronAPI?.onUpdateStatus) return;
-    return window.electronAPI.onUpdateStatus(setUpdateStatus);
+    return window.electronAPI.onUpdateStatus((status) => {
+      setUpdateStatus(status);
+      if (status.state === 'checking') setDismissedUpdateState('');
+    });
   }, []);
 
   useEffect(() => {
@@ -7640,7 +7648,7 @@ export default function App() {
                 className="primary-btn"
                 disabled={
                   updateStatus.state === "checking" ||
-                  updateStatus.state === "downloading"
+                  updateStatus.state === "downloading" || updateStatus.state === "ready"
                 }
                 onClick={async () => {
                   setUpdateStatus({
@@ -9193,14 +9201,7 @@ export default function App() {
       "Finalising exported files",
     ];
     const activity =
-      updateProgress !== null && updateProgress < 100
-        ? {
-            eyebrow: "App Update",
-            title: "Downloading the latest build",
-            detail: `${updateProgress}% complete`,
-            progress: updateProgress,
-          }
-        : isGeneratingCompilation
+      isGeneratingCompilation
           ? {
               eyebrow: "Clip Engine",
               title: compilationProgress?.group
@@ -9564,6 +9565,20 @@ export default function App() {
     <>
       {page}
       <ActivityOverlay />
+      {dismissedUpdateState !== updateStatus.state && ['checking', 'downloading', 'ready', 'error'].includes(updateStatus.state) && (
+        <aside className={`update-download-card ${updateStatus.state}`} aria-label="App update">
+          <div className="update-download-heading"><strong>{updateStatus.state === 'checking' ? 'Checking for updates' : updateStatus.state === 'downloading' ? (updateProgress === 100 ? 'Verifying download' : 'Downloading update') : updateStatus.state === 'ready' ? 'Update ready ✓' : 'Update needs attention'}</strong>
+            {updateStatus.state === 'downloading' && <span>{Math.floor(updateProgress || 0)}%</span>}
+            {['ready', 'error'].includes(updateStatus.state) && <button type="button" aria-label="Dismiss update notice" onClick={() => setDismissedUpdateState(updateStatus.state)}>×</button>}
+          </div>
+          {updateStatus.state === 'downloading' && <>
+            <div className="update-download-track" role="progressbar" aria-label="Update download" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.floor(updateProgress || 0)}><span style={{width: `${updateProgress || 0}%`}} /></div>
+            <small>{updateTransfer.total > 0 ? `${(updateTransfer.transferred / 1048576).toFixed(1)} / ${(updateTransfer.total / 1048576).toFixed(1)} MB` : 'Connecting to download…'}{updateTransfer.bytesPerSecond > 0 ? ` · ${(updateTransfer.bytesPerSecond / 1048576).toFixed(1)} MB/s` : ''}</small>
+          </>}
+          {updateStatus.state === 'checking' && <div className="update-download-track indeterminate"><span /></div>}
+          <p role="status">{updateStatus.state === 'ready' ? 'Keep working. Installs when you close the app; opens again only when you launch it.' : updateStatus.state === 'downloading' ? 'You can keep working. No automatic restart.' : updateStatus.message}</p>
+        </aside>
+      )}
       <AnalystGate />
       <ReliabilityModals />
     </>

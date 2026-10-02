@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("electronAPI", {
   saveWalkthrough: (data) => ipcRenderer.invoke("save-walkthrough", data),
   selectWalkthroughVideos: () => ipcRenderer.invoke("select-walkthrough-videos"),
+  selectWalkthroughVideo: () => ipcRenderer.invoke("select-walkthrough-video"),
   selectVideo: () => ipcRenderer.invoke("select-video"),
   cloudStorageStatus: () => ipcRenderer.invoke("cloud-storage-status"),
   configureCloudStorage: (data) => ipcRenderer.invoke("configure-cloud-storage", data),
